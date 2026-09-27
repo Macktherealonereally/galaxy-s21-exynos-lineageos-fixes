@@ -150,7 +150,7 @@ The carrier app uses `EuiccManager.downloadSubscription()`. With OpenEUICC as th
 - `EuiccResolutionActivity` (the consent dialog);
 - don't report a finished download as failed when only the enable step failed.
 
-Submitted upstream: [`patches/openeuicc/fix-removable-euicc-ignored`](patches/openeuicc/fix-removable-euicc-ignored) (upstream submission pending), [`patches/openeuicc/euiccservice-carrier-app-download`](patches/openeuicc/euiccservice-carrier-app-download) (upstream submission pending).
+Submitted upstream: [PeterCxy/OpenEUICC#358](https://gitea.angry.im/PeterCxy/OpenEUICC/pulls/358), [`patches/openeuicc/euiccservice-carrier-app-download`](patches/openeuicc/euiccservice-carrier-app-download) (upstream submission pending).
 
 ### Symptom 4: download fails at the last step with 6A80
 
@@ -200,7 +200,7 @@ You can make that call with OpenEUICC's slot-mapping screen or with a privileged
 - [exy2100/android_device_samsung_universal2100-common#5](https://github.com/exy2100/android_device_samsung_universal2100-common/pull/5) (RIL shim + slot switch + prop label)
 - [exy2100/proprietary_vendor_samsung_universal2100-common#1](https://github.com/exy2100/proprietary_vendor_samsung_universal2100-common/pull/1) (vendor blob rename)
 - [exy2100/android_device_samsung_o1s#3](https://github.com/exy2100/android_device_samsung_o1s/pull/3) (o1s: OpenEUICC + `android.hardware.telephony.euicc`)
-- [`patches/openeuicc/fix-removable-euicc-ignored`](patches/openeuicc/fix-removable-euicc-ignored) (upstream submission pending), [`patches/openeuicc/lpac-jni-bpp-255-byte-segments`](patches/openeuicc/lpac-jni-bpp-255-byte-segments) (upstream submission pending), [`patches/openeuicc/euiccservice-carrier-app-download`](patches/openeuicc/euiccservice-carrier-app-download) (upstream submission pending) (OpenEUICC)
+- [PeterCxy/OpenEUICC#358](https://gitea.angry.im/PeterCxy/OpenEUICC/pulls/358), [`patches/openeuicc/lpac-jni-bpp-255-byte-segments`](patches/openeuicc/lpac-jni-bpp-255-byte-segments) (upstream submission pending), [`patches/openeuicc/euiccservice-carrier-app-download`](patches/openeuicc/euiccservice-carrier-app-download) (upstream submission pending) (OpenEUICC)
 
 ---
 
@@ -391,7 +391,7 @@ Placeholders like [exy2100/android_device_samsung_universal2100-common#5](https:
 | [#4](https://github.com/exy2100/android_device_samsung_o1s/pull/4) | exy2100 o1s | audio_board_info.xml | open |
 | [#10](https://github.com/exy2100/android_kernel_samsung_universal2100/pull/10) | exy2100 kernel | MFC iovmm leak | open |
 | [#11](https://github.com/exy2100/android_kernel_samsung_universal2100/pull/11) | exy2100 kernel | console-ramoops | open |
-| [OE-12](patches/openeuicc/fix-removable-euicc-ignored) | OpenEUICC (gitea.angry.im) | `shouldIgnoreSlot` fix | patch in this repo; upstream pending |
+| [OpenEUICC#358](https://gitea.angry.im/PeterCxy/OpenEUICC/pulls/358) | OpenEUICC (gitea.angry.im) | `shouldIgnoreSlot` fix | open |
 | [OE-13](patches/openeuicc/lpac-jni-bpp-255-byte-segments) | OpenEUICC | BPP 255-byte blocks (6A80) | patch in this repo; upstream pending |
 | [OE-14](patches/openeuicc/euiccservice-carrier-app-download) | OpenEUICC | carrier-app download + consent UI (#99) | patch in this repo; upstream pending |
 | [GERRIT-15](patches/lineage-vendor-apn) | LineageOS vendor/apn | KPN IMS APN | patch in this repo; upstream pending |
