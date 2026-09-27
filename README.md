@@ -92,8 +92,8 @@ We use krazey's **ImsStack + ImsMedia + CarrierSettings** (Android 17 code, buil
 **PRs:**
 - device (RFC): [exy2100/android_device_samsung_universal2100-common#6](https://github.com/exy2100/android_device_samsung_universal2100-common/pull/6)
 - RIL shim: [exy2100/android_device_samsung_universal2100-common#5](https://github.com/exy2100/android_device_samsung_universal2100-common/pull/5) + [exy2100/proprietary_vendor_samsung_universal2100-common#1](https://github.com/exy2100/proprietary_vendor_samsung_universal2100-common/pull/1)
-- KPN APN: [`patches/lineage-vendor-apn`](patches/lineage-vendor-apn) (upstream submission pending)
-- Telephony: [`patches/lineage-telephony`](patches/lineage-telephony) (upstream submission pending)
+- KPN APN: [LineageOS Gerrit 505199](https://review.lineageos.org/c/LineageOS/android_vendor_apn/+/505199)
+- Telephony: [LineageOS Gerrit 505200](https://review.lineageos.org/c/LineageOS/android_packages_services_Telephony/+/505200)
 - ImsMedia: [krazey/ImsMedia#1](https://github.com/krazey/ImsMedia/pull/1)
 
 ### HD icon on some calls
@@ -394,9 +394,9 @@ Placeholders like [exy2100/android_device_samsung_universal2100-common#5](https:
 | [OpenEUICC#358](https://gitea.angry.im/PeterCxy/OpenEUICC/pulls/358) | OpenEUICC (gitea.angry.im) | `shouldIgnoreSlot` fix | open |
 | [OE-13](patches/openeuicc/lpac-jni-bpp-255-byte-segments) | OpenEUICC | BPP 255-byte blocks (6A80) | patch in this repo; upstream pending |
 | [OE-14](patches/openeuicc/euiccservice-carrier-app-download) | OpenEUICC | carrier-app download + consent UI (#99) | patch in this repo; upstream pending |
-| [GERRIT-15](patches/lineage-vendor-apn) | LineageOS vendor/apn | KPN IMS APN | patch in this repo; upstream pending |
+| [LineageOS Gerrit 505199](https://review.lineageos.org/c/LineageOS/android_vendor_apn/+/505199) | LineageOS vendor/apn | KPN IMS APN | in review |
 | [#6](https://github.com/exy2100/android_device_samsung_universal2100-common/pull/6) | exy2100 universal2100-common | VoLTE integration (RFC) | open |
-| [GERRIT-17](patches/lineage-telephony) | LineageOS Telephony | VoIP audio mode for IMS calls | patch in this repo; upstream pending |
+| [LineageOS Gerrit 505200](https://review.lineageos.org/c/LineageOS/android_packages_services_Telephony/+/505200) | LineageOS Telephony | VoIP audio mode for IMS calls | in review |
 | [#1](https://github.com/krazey/ImsMedia/pull/1) | krazey/ImsMedia | uplink capture reopen | open |
 
 **Credits:**
