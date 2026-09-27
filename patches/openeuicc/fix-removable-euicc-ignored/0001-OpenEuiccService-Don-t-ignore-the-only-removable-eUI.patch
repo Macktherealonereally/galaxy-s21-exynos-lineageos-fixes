@@ -1,0 +1,32 @@
+From 467968eae8092f055961a457c215f1f533f8d57d Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Sat, 26 Sep 2026 22:35:11 +0200
+Subject: [PATCH] OpenEuiccService: Don't ignore the only removable eUICC
+
+shouldIgnoreSlot() returns true for slots to ignore. On devices without an
+internal eUICC it is meant to expose the first removable eUICC to the system,
+but the comparison was inverted, so exactly that slot was ignored and every
+EuiccService call (metadata, download, switch, EID) on it returned
+RESULT_FIRST_USER.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../main/java/im/angry/openeuicc/service/OpenEuiccService.kt    | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/app/src/main/java/im/angry/openeuicc/service/OpenEuiccService.kt b/app/src/main/java/im/angry/openeuicc/service/OpenEuiccService.kt
+index 43b4b54..884e019 100644
+--- a/app/src/main/java/im/angry/openeuicc/service/OpenEuiccService.kt
++++ b/app/src/main/java/im/angry/openeuicc/service/OpenEuiccService.kt
+@@ -40,7 +40,7 @@ class OpenEuiccService : EuiccService(), OpenEuiccContextMarker {
+         } else {
+             // Otherwise, we can report at least one removable eUICC to the system without confusing
+             // it too much.
+-            telephonyManager.uiccCardsInfoCompat.firstOrNull { it.isEuicc }?.physicalSlotIndex == physicalSlotId
++            telephonyManager.uiccCardsInfoCompat.firstOrNull { it.isEuicc }?.physicalSlotIndex != physicalSlotId
+         }
+ 
+     private data class EuiccChannelManagerContext(
+-- 
+2.55.0
+

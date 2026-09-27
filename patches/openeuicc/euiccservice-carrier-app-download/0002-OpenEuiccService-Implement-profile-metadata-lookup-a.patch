@@ -1,0 +1,476 @@
+From 330ae24d56f852ec3b3569ef2012dc0ce13362f8 Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Sat, 26 Sep 2026 22:10:38 +0200
+Subject: [PATCH 2/5] OpenEuiccService: Implement profile metadata lookup and
+ download
+
+Carrier apps (and anything else using the public EuiccManager API)
+download profiles through EuiccService, but OpenEuiccService never
+implemented onDownloadSubscription() and only returned a stub from
+onGetDownloadableSubscriptionMetadata().
+
+- onGetDownloadableSubscriptionMetadata(): run the ES9+ session up to
+  AuthenticateClient to obtain the profile metadata, then abort it.
+  Report the carrier name and the carrier privilege access rules to the
+  platform, which checks them against the calling app before allowing
+  an unprivileged app to download (after the user consented).
+- onDownloadSubscription(): download via the existing foreground
+  download task (notifications, progress) and, for
+  switchAfterDownload, enable the new profile afterwards. Returns
+  RESULT_RESOLVABLE_ERRORS/CONFIRMATION_CODE if the activation code
+  requires a confirmation code that was not supplied, and
+  RESULT_MUST_DEACTIVATE_SIM if no eUICC port is mapped and the
+  platform did not allow deactivating a SIM.
+- hidden-apis-stub/shim: add the port-aware EuiccService overloads and
+  reflection shims for the eUICC system APIs used (Gradle build only;
+  the AOSP build uses the real APIs).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../openeuicc/service/OpenEuiccService.kt     | 305 +++++++++++++++++-
+ .../im/angry/openeuicc/util/EuiccHiddenApi.kt |  40 +++
+ .../android/service/euicc/EuiccService.java   |  21 ++
+ 3 files changed, 362 insertions(+), 4 deletions(-)
+ create mode 100644 libs/hidden-apis-shim/src/main/java/im/angry/openeuicc/util/EuiccHiddenApi.kt
+
+diff --git a/app/src/main/java/im/angry/openeuicc/service/OpenEuiccService.kt b/app/src/main/java/im/angry/openeuicc/service/OpenEuiccService.kt
+index 43b4b54..c668dc6 100644
+--- a/app/src/main/java/im/angry/openeuicc/service/OpenEuiccService.kt
++++ b/app/src/main/java/im/angry/openeuicc/service/OpenEuiccService.kt
+@@ -2,11 +2,15 @@ package im.angry.openeuicc.service
+ 
+ import android.content.Intent
+ import android.os.Build
++import android.os.Bundle
++import android.service.euicc.DownloadSubscriptionResult
+ import android.service.euicc.EuiccProfileInfo
+ import android.service.euicc.EuiccService
+ import android.service.euicc.GetDefaultDownloadableSubscriptionListResult
+ import android.service.euicc.GetDownloadableSubscriptionMetadataResult
+ import android.service.euicc.GetEuiccProfileInfoListResult
++import android.telephony.TelephonyManager
++import android.telephony.UiccAccessRule
+ import android.telephony.UiccSlotMapping
+ import android.telephony.euicc.DownloadableSubscription
+ import android.telephony.euicc.EuiccInfo
+@@ -17,13 +21,23 @@ import im.angry.openeuicc.service.EuiccChannelManagerService.Companion.waitDone
+ import im.angry.openeuicc.util.*
+ import kotlinx.coroutines.delay
+ import kotlinx.coroutines.flow.first
++import kotlinx.coroutines.flow.onEach
+ import kotlinx.coroutines.runBlocking
++import net.typeblog.lpac_jni.LocalProfileAssistant
+ import net.typeblog.lpac_jni.LocalProfileInfo
+ import net.typeblog.lpac_jni.ProfileClass
++import net.typeblog.lpac_jni.ProfileDownloadInput
++import net.typeblog.lpac_jni.ProfileDownloadState
++import net.typeblog.lpac_jni.RemoteProfileAccessRule
++import net.typeblog.lpac_jni.RemoteProfileInfo
+ 
+ class OpenEuiccService : EuiccService(), OpenEuiccContextMarker {
+     companion object {
+         const val TAG = "OpenEuiccService"
++
++        // EuiccService.EXTRA_PACKAGE_NAME (@hide): calling package, set by the platform in the
++        // resolvedBundle passed to onDownloadSubscription()
++        private const val EXTRA_CALLING_PACKAGE_NAME = "android.service.euicc.extra.PACKAGE_NAME"
+     }
+ 
+     private val seId = EuiccChannel.SecureElementId.DEFAULT
+@@ -151,14 +165,297 @@ class OpenEuiccService : EuiccService(), OpenEuiccContextMarker {
+         // Not implemented
+     }
+ 
++    /**
++     * Find a mapped port on physicalSlotId usable for a port-agnostic LPA operation (profile
++     * download, metadata lookup). If no port of the slot is currently mapped, one is mapped only
++     * when forceDeactivateSim is set (as that may deactivate another SIM).
++     *
++     * Returns null if the caller should return RESULT_MUST_DEACTIVATE_SIM; throws on failure.
++     */
++    private suspend fun EuiccChannelManagerContext.findOrMapPort(
++        physicalSlotId: Int,
++        portIndex: Int,
++        forceDeactivateSim: Boolean
++    ): Int? {
++        val port = euiccChannelManager.findFirstAvailablePort(physicalSlotId)
++        if (port >= 0) return port
++
++        if (!forceDeactivateSim) return null
++
++        val targetPort = if (portIndex >= 0) portIndex else 0
++        ensurePortIsMapped(physicalSlotId, targetPort)
++        return retryWithTimeout(5000) {
++            euiccChannelManager.withEuiccChannel(physicalSlotId, targetPort, seId) { channel ->
++                if (!channel.valid) {
++                    throw IllegalStateException("Slot $physicalSlotId port $targetPort is unavailable; may need to try again")
++                }
++                targetPort
++            }
++        } ?: throw IllegalStateException("Slot $physicalSlotId port $targetPort did not become available")
++    }
++
++    private fun DownloadableSubscription.parseActivationCode(): LPAString? =
++        getEncodedActivationCode()?.let { runCatching { LPAString.parse(it) }.getOrNull() }
++
++    private fun EuiccChannel.imeiOrNull(): String? =
++        try {
++            telephonyManager.getImei(logicalSlotId)
++        } catch (_: Exception) {
++            null
++        }
++
++    private fun RemoteProfileAccessRule.toUiccAccessRule(): UiccAccessRule? =
++        try {
++            UiccAccessRule(certificateHash.decodeHex(), packageName, 0)
++        } catch (e: Exception) {
++            Log.w(TAG, "Ignoring malformed access rule $this", e)
++            null
++        }
++
+     override fun onGetDownloadableSubscriptionMetadata(
+         slotId: Int,
+         subscription: DownloadableSubscription?,
+         forceDeactivateSim: Boolean
+-    ): GetDownloadableSubscriptionMetadataResult {
+-        // Stub: return as-is and do not fetch anything
+-        // This is incompatible with carrier eSIM apps; should we make it compatible?
+-        return GetDownloadableSubscriptionMetadataResult(RESULT_OK, subscription)
++    ): GetDownloadableSubscriptionMetadataResult =
++        if (subscription == null) {
++            GetDownloadableSubscriptionMetadataResult(RESULT_FIRST_USER, null)
++        } else {
++            // -1 = any port
++            onGetDownloadableSubscriptionMetadata(slotId, -1, subscription, forceDeactivateSim)
++        }
++
++    /**
++     * Fetch the profile metadata (name, provider, carrier privilege access rules) from the
++     * SM-DP+ without actually downloading the profile: run the download session up to
++     * ES9+.AuthenticateClient, which returns the metadata, then abort the session.
++     *
++     * The platform needs the access rules to allow an unprivileged carrier app to download
++     * the profile (EuiccController.checkCarrierPrivilegeInMetadata()).
++     */
++    override fun onGetDownloadableSubscriptionMetadata(
++        slotId: Int,
++        portIndex: Int,
++        subscription: DownloadableSubscription,
++        forceDeactivateSim: Boolean
++    ): GetDownloadableSubscriptionMetadataResult = withEuiccChannelManager {
++        Log.i(
++            TAG,
++            "onGetDownloadableSubscriptionMetadata slotId=$slotId portIndex=$portIndex forceDeactivateSim=$forceDeactivateSim"
++        )
++        if (shouldIgnoreSlot(slotId)) {
++            return@withEuiccChannelManager GetDownloadableSubscriptionMetadataResult(
++                RESULT_FIRST_USER,
++                null
++            )
++        }
++
++        val lpaString = subscription.parseActivationCode() ?: run {
++            Log.e(TAG, "Invalid or missing activation code")
++            return@withEuiccChannelManager GetDownloadableSubscriptionMetadataResult(
++                RESULT_FIRST_USER,
++                null
++            )
++        }
++
++        val port = try {
++            findOrMapPort(slotId, portIndex, forceDeactivateSim)
++                ?: return@withEuiccChannelManager GetDownloadableSubscriptionMetadataResult(
++                    RESULT_MUST_DEACTIVATE_SIM,
++                    null
++                )
++        } catch (e: Exception) {
++            Log.e(TAG, "No usable port on slot $slotId", e)
++            return@withEuiccChannelManager GetDownloadableSubscriptionMetadataResult(
++                RESULT_FIRST_USER,
++                null
++            )
++        }
++
++        euiccChannelManagerService.waitForForegroundTask()
++
++        var metadataReached = false
++        var metadata: RemoteProfileInfo? = null
++        try {
++            euiccChannelManager.withEuiccChannel(slotId, port, seId) { channel ->
++                channel.lpa.downloadProfile(
++                    ProfileDownloadInput(
++                        lpaString.address,
++                        lpaString.matchingId,
++                        channel.imeiOrNull(),
++                        subscription.confirmationCode
++                    )
++                ) { state ->
++                    if (state is ProfileDownloadState.ConfirmingDownload) {
++                        metadataReached = true
++                        metadata = state.metadata
++                        // We only want the metadata; abort (and cancel) the session here
++                        false
++                    } else {
++                        true
++                    }
++                }
++            }
++        } catch (e: LocalProfileAssistant.ProfileDownloadException) {
++            // Expected when we abort after receiving the metadata
++            if (!metadataReached) {
++                Log.e(TAG, "Failed to fetch profile metadata: ${e.lpaErrorReason}", e)
++                return@withEuiccChannelManager GetDownloadableSubscriptionMetadataResult(
++                    RESULT_FIRST_USER,
++                    null
++                )
++            }
++        } catch (e: Exception) {
++            Log.e(TAG, "Failed to fetch profile metadata", e)
++            return@withEuiccChannelManager GetDownloadableSubscriptionMetadataResult(
++                RESULT_FIRST_USER,
++                null
++            )
++        }
++
++        val builder = DownloadableSubscription.Builder(subscription)
++        val m = metadata
++        if (m != null) {
++            Log.i(
++                TAG,
++                "Profile metadata: provider=${m.providerName} name=${m.name} accessRules=${m.accessRules.size}"
++            )
++            if (m.providerName.isNotBlank()) {
++                builder.setCarrierName(m.providerName)
++            }
++            if (m.accessRules.isNotEmpty()) {
++                builder.setAccessRules(m.accessRules.mapNotNull { it.toUiccAccessRule() })
++            }
++        } else {
++            Log.w(TAG, "SM-DP+ did not return any profile metadata")
++        }
++
++        GetDownloadableSubscriptionMetadataResult(RESULT_OK, builder.build())
++    }
++
++    /**
++     * Download a profile on behalf of the platform (EuiccManager.downloadSubscription, used
++     * by carrier apps). The platform has already done all permission / consent checks by the
++     * time this is called.
++     */
++    override fun onDownloadSubscription(
++        slotIndex: Int,
++        portIndex: Int,
++        subscription: DownloadableSubscription,
++        switchAfterDownload: Boolean,
++        forceDeactivateSim: Boolean,
++        resolvedBundle: Bundle
++    ): DownloadSubscriptionResult {
++        Log.i(
++            TAG,
++            "onDownloadSubscription slotIndex=$slotIndex portIndex=$portIndex switchAfterDownload=$switchAfterDownload forceDeactivateSim=$forceDeactivateSim callingPackage=${
++                resolvedBundle.getString(EXTRA_CALLING_PACKAGE_NAME)
++            }"
++        )
++
++        fun result(code: Int, resolvableErrors: Int = 0, cardId: Int = TelephonyManager.UNSUPPORTED_CARD_ID) =
++            DownloadSubscriptionResult(code, resolvableErrors, cardId)
++
++        if (shouldIgnoreSlot(slotIndex)) return result(RESULT_FIRST_USER)
++
++        val lpaString = subscription.parseActivationCode() ?: run {
++            Log.e(TAG, "Invalid or missing activation code")
++            return result(RESULT_FIRST_USER)
++        }
++
++        if (lpaString.confirmationCodeRequired && subscription.confirmationCode.isNullOrEmpty()) {
++            // Ask the platform to get a confirmation code from the user (RESOLVE_RESOLVABLE_ERRORS)
++            return result(RESULT_RESOLVABLE_ERRORS, RESOLVABLE_ERROR_CONFIRMATION_CODE)
++        }
++
++        // Pair of (download result, (port, ICCID) of the new profile if known)
++        val (downloadResult, downloaded) =
++            withEuiccChannelManager<Pair<DownloadSubscriptionResult, Pair<Int, String>?>> {
++                val port = try {
++                    findOrMapPort(slotIndex, portIndex, forceDeactivateSim)
++                        ?: return@withEuiccChannelManager Pair(
++                            result(RESULT_MUST_DEACTIVATE_SIM),
++                            null
++                        )
++                } catch (e: Exception) {
++                    Log.e(TAG, "No usable port on slot $slotIndex", e)
++                    return@withEuiccChannelManager Pair(result(RESULT_FIRST_USER), null)
++                }
++
++                val (cardId, imei, iccidsBefore) =
++                    euiccChannelManager.withEuiccChannel(slotIndex, port, seId) { channel ->
++                        Triple(
++                            channel.cardId,
++                            channel.imeiOrNull(),
++                            channel.lpa.profiles.map { it.iccid }.toSet()
++                        )
++                    }
++
++                euiccChannelManagerService.waitForForegroundTask()
++                val handle = euiccChannelManagerService.launchProfileDownloadTask(
++                    slotIndex,
++                    port,
++                    seId,
++                    ProfileDownloadInput(
++                        lpaString.address,
++                        lpaString.matchingId,
++                        imei,
++                        subscription.confirmationCode
++                    )
++                )
++                // The consent for this download has already been given through the platform
++                // (carrier privileges or our resolution activity); confirm the metadata step.
++                handle.backChannel.send(true)
++
++                var metadataIccid: String? = null
++                val err = handle.stateFlow.onEach {
++                    val ctx = (it as? EuiccChannelManagerService.ForegroundTaskState.InProgress)?.context
++                    if (ctx is ProfileDownloadState.ConfirmingDownload) {
++                        metadataIccid = ctx.metadata?.iccid?.ifBlank { null }
++                    }
++                }.waitDone()
++
++                if (err != null) {
++                    Log.e(TAG, "Profile download failed", err)
++                    return@withEuiccChannelManager Pair(result(RESULT_FIRST_USER, cardId = cardId), null)
++                }
++
++                val newIccid = try {
++                    euiccChannelManager.withEuiccChannel(slotIndex, port, seId) { channel ->
++                        channel.lpa.profiles.map { it.iccid }.firstOrNull { it !in iccidsBefore }
++                    }
++                } catch (e: Exception) {
++                    null
++                } ?: metadataIccid
++
++                Log.i(TAG, "Downloaded profile iccid=$newIccid on slot $slotIndex port $port")
++                Pair(result(RESULT_OK, cardId = cardId), newIccid?.let { Pair(port, it) })
++            }
++
++        if (downloadResult.result != RESULT_OK || !switchAfterDownload) {
++            return downloadResult
++        }
++
++        val (port, iccid) = downloaded ?: run {
++            Log.e(TAG, "Downloaded profile not found; cannot switch to it")
++            return result(RESULT_FIRST_USER, cardId = downloadResult.cardId)
++        }
++
++        // Never report RESULT_MUST_DEACTIVATE_SIM at this point: the profile is already
++        // downloaded, and the platform would retry the whole download upon consent. Hence
++        // forceDeactivateSim = true: switchAfterDownload already implies replacing whatever
++        // profile is active on the target port.
++        val switchResult = onSwitchToSubscriptionWithPort(
++            slotIndex,
++            if (portIndex >= 0) portIndex else port,
++            iccid,
++            true
++        )
++        return if (switchResult == RESULT_OK) {
++            downloadResult
++        } else {
++            Log.e(TAG, "Profile downloaded but could not be enabled: $switchResult")
++            result(RESULT_FIRST_USER, cardId = downloadResult.cardId)
++        }
+     }
+ 
+     override fun onGetDefaultDownloadableSubscriptionList(
+diff --git a/libs/hidden-apis-shim/src/main/java/im/angry/openeuicc/util/EuiccHiddenApi.kt b/libs/hidden-apis-shim/src/main/java/im/angry/openeuicc/util/EuiccHiddenApi.kt
+new file mode 100644
+index 0000000..8344d5c
+--- /dev/null
++++ b/libs/hidden-apis-shim/src/main/java/im/angry/openeuicc/util/EuiccHiddenApi.kt
+@@ -0,0 +1,40 @@
++package im.angry.openeuicc.util
++
++import android.content.Intent
++import android.os.Bundle
++import android.telephony.UiccAccessRule
++import android.telephony.euicc.DownloadableSubscription
++import android.telephony.euicc.EuiccManager
++import java.lang.reflect.Method
++
++// System APIs of android.telephony.euicc via reflection to enable building without AOSP source
++// tree (see TelephonyManagerHiddenApi.kt). When building against AOSP, the real member
++// functions take precedence and this file is not compiled at all.
++private val continueOperation: Method by lazy {
++    EuiccManager::class.java.getMethod(
++        "continueOperation",
++        Intent::class.java, Bundle::class.java
++    )
++}
++private val builderSetCarrierName: Method by lazy {
++    DownloadableSubscription.Builder::class.java.getMethod(
++        "setCarrierName",
++        String::class.java
++    )
++}
++private val builderSetAccessRules: Method by lazy {
++    DownloadableSubscription.Builder::class.java.getMethod(
++        "setAccessRules",
++        List::class.java
++    )
++}
++
++fun EuiccManager.continueOperation(resolutionIntent: Intent, resolutionExtras: Bundle) {
++    continueOperation.invoke(this, resolutionIntent, resolutionExtras)
++}
++
++fun DownloadableSubscription.Builder.setCarrierName(value: String): DownloadableSubscription.Builder =
++    builderSetCarrierName.invoke(this, value) as DownloadableSubscription.Builder
++
++fun DownloadableSubscription.Builder.setAccessRules(value: List<UiccAccessRule>): DownloadableSubscription.Builder =
++    builderSetAccessRules.invoke(this, value) as DownloadableSubscription.Builder
+diff --git a/libs/hidden-apis-stub/src/main/java/android/service/euicc/EuiccService.java b/libs/hidden-apis-stub/src/main/java/android/service/euicc/EuiccService.java
+index 20be2d9..22bfb88 100644
+--- a/libs/hidden-apis-stub/src/main/java/android/service/euicc/EuiccService.java
++++ b/libs/hidden-apis-stub/src/main/java/android/service/euicc/EuiccService.java
+@@ -151,6 +151,12 @@ public abstract class EuiccService extends Service {
+      */
+     public static final String EXTRA_RESOLUTION_CARD_ID =
+         "android.service.euicc.extra.RESOLUTION_CARD_ID";
++    /**
++     * Intent extra set for resolution requests containing an int indicating the subscription id
++     * to be enabled.
++     */
++    public static final String EXTRA_RESOLUTION_SUBSCRIPTION_ID =
++        "android.service.euicc.extra.RESOLUTION_SUBSCRIPTION_ID";
+     /**
+      * Intent extra set for resolution requests containing an int indicating the current port index.
+      */
+@@ -288,6 +294,14 @@ public abstract class EuiccService extends Service {
+     public abstract GetDownloadableSubscriptionMetadataResult onGetDownloadableSubscriptionMetadata(
+         int slotId, DownloadableSubscription subscription, boolean forceDeactivateSim);
+ 
++    public GetDownloadableSubscriptionMetadataResult onGetDownloadableSubscriptionMetadata(
++        int slotId, int portIndex, DownloadableSubscription subscription,
++        boolean forceDeactivateSim) {
++        // stub implementation, LPA needs to implement this
++        throw new UnsupportedOperationException(
++            "LPA must override onGetDownloadableSubscriptionMetadata");
++    }
++
+     /**
+      * Return metadata for subscriptions which are available for download for this device.
+      *
+@@ -328,6 +342,13 @@ public abstract class EuiccService extends Service {
+         return null;
+     }
+ 
++    public DownloadSubscriptionResult onDownloadSubscription(int slotIndex, int portIndex,
++                                                             DownloadableSubscription subscription, boolean switchAfterDownload,
++                                                             boolean forceDeactivateSim, Bundle resolvedBundle) {
++        // stub implementation, LPA needs to implement this
++        throw new UnsupportedOperationException("LPA must override onDownloadSubscription");
++    }
++
+     /**
+      * Download the given subscription.
+      *
+-- 
+2.55.0
+

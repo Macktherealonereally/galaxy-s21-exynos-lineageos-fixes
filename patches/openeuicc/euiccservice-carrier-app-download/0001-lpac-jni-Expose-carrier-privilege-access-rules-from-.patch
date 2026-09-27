@@ -1,0 +1,174 @@
+From 1bcd6d1bd359c9c8c73e8a3d8c9a3278362fde51 Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Sat, 26 Sep 2026 22:03:04 +0200
+Subject: [PATCH 1/5] lpac-jni: Expose carrier privilege access rules from
+ profile metadata
+
+lpac already parses the REF-AR-DO entries (StoreMetadataRequest tag BF76)
+of the profile metadata returned by ES9+.AuthenticateClient, but they
+were dropped at the JNI boundary. Pass them through to RemoteProfileInfo
+so that OpenEuiccService can report them to the platform in
+onGetDownloadableSubscriptionMetadata(). EuiccController requires these
+rules to match the calling carrier app before it lets an unprivileged
+app download a profile (checkCarrierPrivilegeInMetadata()).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../typeblog/lpac_jni/RemoteProfileInfo.kt    | 28 +++++++
+ .../src/main/jni/lpac-jni/lpac-download.c     | 73 ++++++++++++++++++-
+ 2 files changed, 99 insertions(+), 2 deletions(-)
+
+diff --git a/libs/lpac-jni/src/main/java/net/typeblog/lpac_jni/RemoteProfileInfo.kt b/libs/lpac-jni/src/main/java/net/typeblog/lpac_jni/RemoteProfileInfo.kt
+index dfe7be6..2bf2020 100644
+--- a/libs/lpac-jni/src/main/java/net/typeblog/lpac_jni/RemoteProfileInfo.kt
++++ b/libs/lpac-jni/src/main/java/net/typeblog/lpac_jni/RemoteProfileInfo.kt
+@@ -6,4 +6,32 @@ data class RemoteProfileInfo(
+     val name: String,
+     val providerName: String,
+     val profileClass: ProfileClass,
++    /**
++     * Carrier privilege access rules (REF-AR-DO, SGP.22 StoreMetadataRequest tag BF76)
++     * carried in the profile metadata, if any. Android uses these to decide whether an
++     * unprivileged carrier app may download this profile via EuiccManager.
++     */
++    val accessRules: List<RemoteProfileAccessRule> = emptyList(),
++) {
++    // Used by JNI (see lpac-download.c)
++    @Suppress("unused")
++    constructor(
++        iccid: String,
++        name: String,
++        providerName: String,
++        profileClass: ProfileClass,
++        accessRules: Array<RemoteProfileAccessRule>,
++    ) : this(iccid, name, providerName, profileClass, accessRules.toList())
++}
++
++/**
++ * A single REF-AR-DO entry from profile metadata.
++ *
++ * @param certificateHash Hex-encoded hash (SHA-1 or SHA-256) of the app signing certificate
++ * @param packageName Optional package name; null if the rule applies to any package signed
++ *                    with the certificate.
++ */
++data class RemoteProfileAccessRule(
++    val certificateHash: String,
++    val packageName: String?,
+ )
+diff --git a/libs/lpac-jni/src/main/jni/lpac-jni/lpac-download.c b/libs/lpac-jni/src/main/jni/lpac-jni/lpac-download.c
+index dcf3376..4cb4b94 100644
+--- a/libs/lpac-jni/src/main/jni/lpac-jni/lpac-download.c
++++ b/libs/lpac-jni/src/main/jni/lpac-jni/lpac-download.c
+@@ -17,6 +17,8 @@ jclass confirming_download_class;
+ jmethodID confirming_download_constructor;
+ jclass remote_profile_info_class;
+ jmethodID remote_profile_info_constructor;
++jclass remote_profile_access_rule_class;
++jmethodID remote_profile_access_rule_constructor;
+ jobject profile_class_testing;
+ jobject profile_class_provisioning;
+ jobject profile_class_operational;
+@@ -111,7 +113,15 @@ void lpac_download_init() {
+                                                           "net/typeblog/lpac_jni/RemoteProfileInfo");
+     remote_profile_info_class = (*env)->NewGlobalRef(env, _remote_profile_info_class);
+     remote_profile_info_constructor = (*env)->GetMethodID(env, remote_profile_info_class, "<init>",
+-                                                          "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lnet/typeblog/lpac_jni/ProfileClass;)V");
++                                                          "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lnet/typeblog/lpac_jni/ProfileClass;[Lnet/typeblog/lpac_jni/RemoteProfileAccessRule;)V");
++
++    jclass _remote_profile_access_rule_class = (*env)->FindClass(env,
++                                                                 "net/typeblog/lpac_jni/RemoteProfileAccessRule");
++    remote_profile_access_rule_class = (*env)->NewGlobalRef(env, _remote_profile_access_rule_class);
++    remote_profile_access_rule_constructor = (*env)->GetMethodID(env,
++                                                                 remote_profile_access_rule_class,
++                                                                 "<init>",
++                                                                 "(Ljava/lang/String;Ljava/lang/String;)V");
+ }
+ 
+ static jobject profile_class_from_es10c_profile_class(enum es10c_profile_class profile_class) {
+@@ -127,14 +137,71 @@ static jobject profile_class_from_es10c_profile_class(enum es10c_profile_class p
+     }
+ }
+ 
++static jobjectArray create_remote_profile_access_rules(JNIEnv *env,
++                                                       struct es8p_metadata_access_rule *rules) {
++    struct es8p_metadata_access_rule *rule;
++    jobjectArray ret = NULL;
++    jsize count = 0;
++    jsize i = 0;
++
++    for (rule = rules; rule != NULL; rule = rule->next) {
++        if (rule->certificateHash != NULL)
++            count++;
++    }
++
++    ret = (*env)->NewObjectArray(env, count, remote_profile_access_rule_class, NULL);
++    if (ret == NULL)
++        return NULL;
++
++    for (rule = rules; rule != NULL && i < count; rule = rule->next) {
++        jstring cert_hash = NULL;
++        jstring package_name = NULL;
++        jobject access_rule = NULL;
++
++        if (rule->certificateHash == NULL)
++            continue;
++
++        cert_hash = toJString(env, rule->certificateHash);
++        // Pass a real null (not "") when the rule does not restrict the package name
++        if (rule->packageName != NULL)
++            package_name = toJString(env, rule->packageName);
++
++        access_rule = (*env)->NewObject(env, remote_profile_access_rule_class,
++                                        remote_profile_access_rule_constructor,
++                                        cert_hash, package_name);
++        if (access_rule != NULL) {
++            (*env)->SetObjectArrayElement(env, ret, i, access_rule);
++            (*env)->DeleteLocalRef(env, access_rule);
++        }
++        i++;
++
++        if (cert_hash != NULL)
++            (*env)->DeleteLocalRef(env, cert_hash);
++        if (package_name != NULL)
++            (*env)->DeleteLocalRef(env, package_name);
++
++        if (access_rule == NULL) {
++            (*env)->DeleteLocalRef(env, ret);
++            return NULL;
++        }
++    }
++
++    return ret;
++}
++
+ static jobject create_remote_profile_info(JNIEnv *env,
+                                           struct es8p_metadata *profile_metadata) {
+     jobject profile_class = NULL;
+     jstring metadata_iccid = NULL;
+     jstring metadata_profile_name = NULL;
+     jstring metadata_provider_name = NULL;
++    jobjectArray metadata_access_rules = NULL;
+     jobject remote_profile_info = NULL;
+ 
++    metadata_access_rules = create_remote_profile_access_rules(env, profile_metadata->accessRules);
++    if (metadata_access_rules == NULL)
++        return NULL;
++
+     metadata_iccid = toJString(env, profile_metadata->iccid);
+     metadata_profile_name = toJString(env, profile_metadata->profileName);
+     metadata_provider_name = toJString(env, profile_metadata->serviceProviderName);
+@@ -145,8 +212,10 @@ static jobject create_remote_profile_info(JNIEnv *env,
+                                             metadata_iccid,
+                                             metadata_profile_name,
+                                             metadata_provider_name,
+-                                            profile_class);
++                                            profile_class,
++                                            metadata_access_rules);
+ 
++    (*env)->DeleteLocalRef(env, metadata_access_rules);
+     if (metadata_iccid != NULL)
+         (*env)->DeleteLocalRef(env, metadata_iccid);
+     if (metadata_profile_name != NULL)
+-- 
+2.55.0
+

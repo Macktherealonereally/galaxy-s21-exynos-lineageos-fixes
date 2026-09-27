@@ -1,0 +1,42 @@
+From 6dabb8d1615314c783c4c6a2c459ae11c3efa235 Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Sun, 27 Sep 2026 11:41:23 +0200
+Subject: [PATCH 4/5] OpenEuiccService: Log why a profile switch failed
+
+onSwitchToSubscriptionWithPort() turned every failure (switch task
+error, SwitchingProfilesRefreshException, reconnect timeout, mapping
+errors) into RESULT_FIRST_USER without logging anything, so a failed
+enable after a platform-initiated download (switchAfterDownload) left
+no trace in logcat. Log the task error and any caught exception.
+
+No functional change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../java/im/angry/openeuicc/service/OpenEuiccService.kt   | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/app/src/main/java/im/angry/openeuicc/service/OpenEuiccService.kt b/app/src/main/java/im/angry/openeuicc/service/OpenEuiccService.kt
+index c668dc6..24966c2 100644
+--- a/app/src/main/java/im/angry/openeuicc/service/OpenEuiccService.kt
++++ b/app/src/main/java/im/angry/openeuicc/service/OpenEuiccService.kt
+@@ -673,10 +673,14 @@ class OpenEuiccService : EuiccService(), OpenEuiccContextMarker {
+                 30 * 1000
+             ).stateFlow.waitDone()
+ 
+-            if (res != null) return@withEuiccChannelManager RESULT_FIRST_USER
++            if (res != null) {
++                Log.e(TAG, "Profile switch task failed (iccid=$foundIccid enable=$enable)", res)
++                return@withEuiccChannelManager RESULT_FIRST_USER
++            }
+ 
+             return@withEuiccChannelManager RESULT_OK
+-        } catch (_: Exception) {
++        } catch (e: Exception) {
++            Log.e(TAG, "onSwitchToSubscriptionWithPort failed", e)
+             return@withEuiccChannelManager RESULT_FIRST_USER
+         } finally {
+             euiccChannelManager.invalidate()
+-- 
+2.55.0
+

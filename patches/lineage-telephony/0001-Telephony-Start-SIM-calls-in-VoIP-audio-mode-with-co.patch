@@ -1,0 +1,50 @@
+From fe5563048d97e432a3931a5f8fe10b0535704a98 Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Sat, 26 Sep 2026 13:09:42 +0200
+Subject: [PATCH] Telephony: Start SIM calls in VoIP audio mode with
+ config_use_voip_mode_for_ims
+
+With config_use_voip_mode_for_ims, ImsPhoneConnection reports VoIP
+audio mode, but Telecom only learns this after the connection has been
+created. Outgoing calls therefore enter MODE_IN_CALL first and switch
+to MODE_IN_COMMUNICATION a few hundred milliseconds later. On Samsung
+Exynos devices the audio HAL starts and stops the modem voice call path
+for that transient mode, and an uplink capture stream opened meanwhile
+keeps the in-call capture configuration.
+
+Set PhoneAccount.EXTRA_ALWAYS_USE_VOIP_AUDIO_MODE on non-emergency PSTN
+accounts when the overlay is enabled, so Telecom starts these calls in
+MODE_IN_COMMUNICATION. Circuit-switched connections still report
+non-VoIP audio mode on creation, which moves the call to MODE_IN_CALL
+as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Change-Id: I29305d744bec55b209642d3324396f5b94fa6686
+---
+ .../services/telephony/TelecomAccountRegistry.java     | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/com/android/services/telephony/TelecomAccountRegistry.java b/src/com/android/services/telephony/TelecomAccountRegistry.java
+index 4a90dc1..3f3f5b6 100644
+--- a/src/com/android/services/telephony/TelecomAccountRegistry.java
++++ b/src/com/android/services/telephony/TelecomAccountRegistry.java
+@@ -518,6 +518,16 @@ public class TelecomAccountRegistry {
+                     mContext.getResources()
+                             .getBoolean(R.bool.config_support_video_calling_fallback));
+ 
++            // Devices that run IMS media on the application processor use VoIP audio mode for
++            // IMS calls. Start calls on this account in VoIP audio mode as well, so Telecom does
++            // not set MODE_IN_CALL (which starts the modem voice path in the audio HAL) before
++            // the IMS connection reports its audio mode. Circuit-switched connections still
++            // report non-VoIP audio mode and move the call to MODE_IN_CALL.
++            if (!isEmergency && mContext.getResources().getBoolean(
++                    com.android.internal.R.bool.config_use_voip_mode_for_ims)) {
++                extras.putBoolean(PhoneAccount.EXTRA_ALWAYS_USE_VOIP_AUDIO_MODE, true);
++            }
++
+             if (slotId != SubscriptionManager.INVALID_SIM_SLOT_INDEX) {
+                 extras.putInt(PhoneAccount.EXTRA_SORT_ORDER, slotId);
+             }
+-- 
+2.55.0
+

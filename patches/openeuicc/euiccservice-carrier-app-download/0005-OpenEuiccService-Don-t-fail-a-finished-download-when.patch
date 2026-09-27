@@ -1,0 +1,84 @@
+From 17c27950f73daef4b50c09ddc51f44e5331af0cf Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Sun, 27 Sep 2026 11:41:42 +0200
+Subject: [PATCH 5/5] OpenEuiccService: Don't fail a finished download when the
+ switch fails
+
+With switchAfterDownload, onDownloadSubscription() reported
+RESULT_FIRST_USER when the profile had been installed but could not be
+enabled afterwards (e.g. the eUICC REFRESH after EnableProfile failed
+with catBusy, the port did not come back within the reconnect timeout,
+or the new ICCID could not be determined). Carrier apps then show a
+generic install error and ask the user to request a new activation
+code, although the profile is already on the card and the SM-DP+ has
+received the installation result; every new attempt counts against the
+order's retry limit.
+
+Report the download as successful once LoadBoundProfilePackage
+succeeded, log that the profile has to be enabled manually, and ask the
+platform to refresh its embedded subscription list (it does not do so
+itself for switchAfterDownload) so the profile shows up in Settings.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../openeuicc/service/OpenEuiccService.kt     | 36 +++++++++++++++----
+ 1 file changed, 29 insertions(+), 7 deletions(-)
+
+diff --git a/app/src/main/java/im/angry/openeuicc/service/OpenEuiccService.kt b/app/src/main/java/im/angry/openeuicc/service/OpenEuiccService.kt
+index 24966c2..c941773 100644
+--- a/app/src/main/java/im/angry/openeuicc/service/OpenEuiccService.kt
++++ b/app/src/main/java/im/angry/openeuicc/service/OpenEuiccService.kt
+@@ -435,9 +435,15 @@ class OpenEuiccService : EuiccService(), OpenEuiccContextMarker {
+             return downloadResult
+         }
+ 
++        // From here on the profile is already installed on the eUICC. Never report an error for
++        // the download any more: the calling (carrier) app would treat the whole operation as
++        // failed and typically request a new activation code, which the SM-DP+ counts against
++        // the order's retry limit, while the profile is sitting on the card. Report success and
++        // let the user enable the profile manually if the automatic switch did not work.
+         val (port, iccid) = downloaded ?: run {
+-            Log.e(TAG, "Downloaded profile not found; cannot switch to it")
+-            return result(RESULT_FIRST_USER, cardId = downloadResult.cardId)
++            Log.e(TAG, "Downloaded profile not found; cannot switch to it (download itself succeeded)")
++            refreshEuiccInfoAfterDownload(downloadResult.cardId)
++            return downloadResult
+         }
+ 
+         // Never report RESULT_MUST_DEACTIVATE_SIM at this point: the profile is already
+@@ -450,11 +456,27 @@ class OpenEuiccService : EuiccService(), OpenEuiccContextMarker {
+             iccid,
+             true
+         )
+-        return if (switchResult == RESULT_OK) {
+-            downloadResult
+-        } else {
+-            Log.e(TAG, "Profile downloaded but could not be enabled: $switchResult")
+-            result(RESULT_FIRST_USER, cardId = downloadResult.cardId)
++        if (switchResult != RESULT_OK) {
++            Log.e(
++                TAG,
++                "Profile $iccid downloaded but could not be enabled automatically ($switchResult); " +
++                    "reporting the download as successful, enable it manually"
++            )
++            refreshEuiccInfoAfterDownload(downloadResult.cardId)
++        }
++        return downloadResult
++    }
++
++    /**
++     * With switchAfterDownload, the platform does not refresh its embedded subscription list after
++     * a successful download (the profile switch is expected to trigger that). Refresh it
++     * explicitly when the switch did not happen, so that the new profile shows up in Settings.
++     */
++    private fun refreshEuiccInfoAfterDownload(cardId: Int) {
++        try {
++            appContainer.subscriptionManager.tryRefreshCachedEuiccInfo(cardId)
++        } catch (e: Exception) {
++            Log.w(TAG, "Could not refresh the embedded subscription list for card $cardId", e)
+         }
+     }
+ 
+-- 
+2.55.0
+

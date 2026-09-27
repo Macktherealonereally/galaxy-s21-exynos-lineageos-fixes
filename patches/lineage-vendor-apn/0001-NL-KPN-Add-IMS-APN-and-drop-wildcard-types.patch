@@ -1,0 +1,72 @@
+From bf08bed0f7c71f5dd597cdc22db390ee134ff076 Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Sat, 26 Sep 2026 07:33:01 +0200
+Subject: [PATCH] NL: KPN: Add IMS APN and drop wildcard types
+
+Three 204-08 internet APNs (AH, Hi and KPN Mobiel Internet) use
+type="*", which includes ims. Without MVNO filters they apply to every
+SIM on KPN, the first one gets picked as the internet APN, and its
+network then carries NET_CAPABILITY_IMS/MMTEL. Telephony then does not
+add its default IMS profile, and an IMS request is attached to the
+internet PDN, which has no P-CSCF, so VoLTE cannot register.
+
+Give them the same types as the other KPN internet APNs and add KPN's
+IMS APN ("ims", IPv4v6), as stock firmware uses.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Change-Id: Iba7c316fb91f419e739e904a3df363c260634858
+---
+ NL.xml | 16 +++++++++++++---
+ 1 file changed, 13 insertions(+), 3 deletions(-)
+
+diff --git a/NL.xml b/NL.xml
+index abcbd0f..01bf9ed 100644
+--- a/NL.xml
++++ b/NL.xml
+@@ -303,7 +303,7 @@
+         password=""
+         port=""
+         proxy=""
+-        type="*"
++        type="default,supl,mms"
+         user=""
+     />
+     <apn
+@@ -317,7 +317,7 @@
+         password=""
+         port=""
+         proxy=""
+-        type="*"
++        type="default,supl,mms"
+         user=""
+     />
+     <apn
+@@ -339,6 +339,16 @@
+         type="default,supl"
+         user="kpn"
+     />
++    <apn
++        mcc="204"
++        mnc="08"
++        carrier="KPN IMS"
++        apn="ims"
++        protocol="IPV4V6"
++        roaming_protocol="IPV4V6"
++        type="ims"
++        user_visible="false"
++    />
+     <apn
+         mcc="204"
+         mnc="08"
+@@ -350,7 +360,7 @@
+         password=""
+         port=""
+         proxy=""
+-        type="*"
++        type="default,supl,mms"
+         user=""
+     />
+     <apn
+-- 
+2.55.0
+

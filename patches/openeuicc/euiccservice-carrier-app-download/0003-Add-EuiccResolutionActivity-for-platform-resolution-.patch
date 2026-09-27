@@ -1,0 +1,415 @@
+From 255d3fc77bf6ddf89028697f8ba54497a5a347b9 Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Sat, 26 Sep 2026 22:10:54 +0200
+Subject: [PATCH 3/5] Add EuiccResolutionActivity for platform resolution
+ (consent) flows
+
+When an app without carrier privileges over the eUICC (e.g. a carrier
+app downloading its eSIM through EuiccManager) requests a download or
+switch, EuiccController asks the LUI for the user's consent through
+com.android.phone's EuiccResolutionUiDispatcherActivity. OpenEUICC had
+no activity for these actions, so the dispatcher failed with "Could not
+resolve activity for intent: RESOLVE_NO_PRIVILEGES" and the operation
+failed towards the calling app.
+
+Handle the three resolution actions the dispatcher forwards:
+- RESOLVE_NO_PRIVILEGES: "Allow <app> to download an eSIM?" (or switch)
+- RESOLVE_DEACTIVATE_SIM: consent to turn off the active profile
+- RESOLVE_RESOLVABLE_ERRORS: confirmation code input and/or consent
+  to profile policy rules
+and report the result with EuiccManager.continueOperation() using the
+EXTRA_RESOLUTION_* keys. Declining, pressing back or otherwise leaving
+the dialog reports consent = false, which fails the operation.
+
+Per EuiccConnector.findBestActivity(), the activity requires
+BIND_EUICC_SERVICE and has a non-zero intent filter priority. It only
+exists in the privileged app manifest. QUERY_ALL_PACKAGES is needed to
+show the calling app's label. Includes English and Dutch strings.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/main/AndroidManifest.xml              |  25 ++
+ .../openeuicc/ui/EuiccResolutionActivity.kt   | 237 ++++++++++++++++++
+ .../layout/dialog_euicc_resolution_code.xml   |  25 ++
+ app/src/main/res/values-nl/strings.xml        |  20 ++
+ app/src/main/res/values/strings.xml           |  18 ++
+ 5 files changed, 325 insertions(+)
+ create mode 100644 app/src/main/java/im/angry/openeuicc/ui/EuiccResolutionActivity.kt
+ create mode 100644 app/src/main/res/layout/dialog_euicc_resolution_code.xml
+ create mode 100644 app/src/main/res/values-nl/strings.xml
+
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index ea7562e..f9f5225 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -13,6 +13,10 @@
+     <uses-permission android:name="android.permission.READ_PRIVILEGED_PHONE_STATE" />
+     <uses-permission android:name="android.permission.WRITE_EMBEDDED_SUBSCRIPTIONS" />
+     <uses-permission android:name="android.permission.SECURE_ELEMENT_PRIVILEGED_OPERATION" />
++    <!-- Show the label of the app requesting an eUICC operation in EuiccResolutionActivity -->
++    <uses-permission
++        android:name="android.permission.QUERY_ALL_PACKAGES"
++        tools:ignore="QueryAllPackagesPermission" />
+ 
+     <application
+         android:name=".PrivilegedOpenEuiccApplication"
+@@ -56,6 +60,27 @@
+             </intent-filter>
+         </activity>
+ 
++        <!--
++            LUI resolution activity, started by com.android.phone's
++            EuiccResolutionUiDispatcherActivity. Like all LUI components, it must require
++            BIND_EUICC_SERVICE and declare a non-zero priority (EuiccConnector.findBestActivity).
++        -->
++        <activity
++            android:name=".ui.EuiccResolutionActivity"
++            android:excludeFromRecents="true"
++            android:exported="true"
++            android:permission="android.permission.BIND_EUICC_SERVICE"
++            android:theme="@style/Theme.App.DeepLinkTransparent">
++            <intent-filter android:priority="100">
++                <action android:name="android.service.euicc.action.RESOLVE_NO_PRIVILEGES" />
++                <action android:name="android.service.euicc.action.RESOLVE_DEACTIVATE_SIM" />
++                <action android:name="android.service.euicc.action.RESOLVE_RESOLVABLE_ERRORS" />
++
++                <category android:name="android.intent.category.DEFAULT" />
++                <category android:name="android.service.euicc.category.EUICC_UI" />
++            </intent-filter>
++        </activity>
++
+         <service
+             android:name="androidx.appcompat.app.AppLocalesMetadataHolderService"
+             android:enabled="false"
+diff --git a/app/src/main/java/im/angry/openeuicc/ui/EuiccResolutionActivity.kt b/app/src/main/java/im/angry/openeuicc/ui/EuiccResolutionActivity.kt
+new file mode 100644
+index 0000000..c650485
+--- /dev/null
++++ b/app/src/main/java/im/angry/openeuicc/ui/EuiccResolutionActivity.kt
+@@ -0,0 +1,237 @@
++package im.angry.openeuicc.ui
++
++import android.content.DialogInterface
++import android.os.Bundle
++import android.service.euicc.EuiccService
++import android.telephony.SubscriptionManager
++import android.telephony.TelephonyManager
++import android.telephony.euicc.EuiccManager
++import android.util.Log
++import android.view.View
++import android.widget.EditText
++import androidx.appcompat.app.AlertDialog
++import androidx.appcompat.app.AppCompatActivity
++import androidx.core.widget.doAfterTextChanged
++import com.google.android.material.textfield.TextInputLayout
++import im.angry.openeuicc.R
++import im.angry.openeuicc.util.*
++
++/**
++ * LUI resolution activity: asks the user for consent (or input) when the platform
++ * (EuiccController) cannot complete an EuiccManager operation requested by an app on its own,
++ * then reports the user's decision back via EuiccManager.continueOperation().
++ *
++ * Started by com.android.phone's EuiccResolutionUiDispatcherActivity with one of
++ * - EuiccService.ACTION_RESOLVE_NO_PRIVILEGES: the calling app (e.g. a carrier app) has no
++ *   carrier privileges over the target eSIM; ask the user whether to allow the download / switch
++ * - EuiccService.ACTION_RESOLVE_DEACTIVATE_SIM: an active SIM must be turned off to continue
++ * - EuiccService.ACTION_RESOLVE_RESOLVABLE_ERRORS: a confirmation code and/or the user's consent
++ *   to profile policy rules is needed
++ *
++ * The intent's extras must be passed back untouched to continueOperation(), as they carry the
++ * pending operation. Declining (or dismissing) the dialog reports consent = false, which makes
++ * the platform fail the operation towards the calling app.
++ */
++class EuiccResolutionActivity : AppCompatActivity() {
++    companion object {
++        private const val TAG = "EuiccResolutionActivity"
++    }
++
++    private var resolved = false
++
++    private val resolutionCallingPackage: String? by lazy {
++        intent.getStringExtra(EuiccService.EXTRA_RESOLUTION_CALLING_PACKAGE)
++    }
++
++    private val callingAppLabel: CharSequence by lazy {
++        resolutionCallingPackage?.let { pkg ->
++            try {
++                packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0))
++            } catch (e: Exception) {
++                Log.w(TAG, "Unable to load the label of $pkg", e)
++                pkg
++            }
++        } ?: getString(R.string.euicc_resolution_unknown_app)
++    }
++
++    override fun onCreate(savedInstanceState: Bundle?) {
++        super.onCreate(savedInstanceState)
++        window.setBackgroundDrawableResource(android.R.color.transparent)
++
++        Log.i(
++            TAG,
++            "Resolution requested: action=${intent.action} callingPackage=$resolutionCallingPackage " +
++                    "cardId=${intent.getIntExtra(EuiccService.EXTRA_RESOLUTION_CARD_ID, -1)} " +
++                    "portIndex=${intent.getIntExtra(EuiccService.EXTRA_RESOLUTION_PORT_INDEX, -1)}"
++        )
++
++        val dialog = when (intent.action) {
++            EuiccService.ACTION_RESOLVE_NO_PRIVILEGES -> createNoPrivilegesDialog()
++            EuiccService.ACTION_RESOLVE_DEACTIVATE_SIM -> createDeactivateSimDialog()
++            EuiccService.ACTION_RESOLVE_RESOLVABLE_ERRORS -> createResolvableErrorsDialog()
++            else -> {
++                Log.w(TAG, "Unsupported resolution action ${intent.action}")
++                finish()
++                return
++            }
++        }
++
++        // Back cancels (= declines), but don't decline because of a stray tap outside the dialog
++        dialog.setCanceledOnTouchOutside(false)
++        dialog.setOnCancelListener { resolve(false) }
++        dialog.show()
++    }
++
++    override fun onDestroy() {
++        // Never leave the pending operation (and the calling app) hanging
++        if (isFinishing && !resolved) {
++            resolve(false)
++        }
++        super.onDestroy()
++    }
++
++    private fun dialogBuilder() =
++        AlertDialog.Builder(this, im.angry.openeuicc.common.R.style.AlertDialogTheme)
++            .setCancelable(true)
++
++    private fun createNoPrivilegesDialog(): AlertDialog {
++        // A valid subscription ID means that this is about switching to an existing profile;
++        // for downloads, the platform passes INVALID_SUBSCRIPTION_ID.
++        val isSwitch = intent.getIntExtra(
++            EuiccService.EXTRA_RESOLUTION_SUBSCRIPTION_ID,
++            SubscriptionManager.INVALID_SUBSCRIPTION_ID
++        ) != SubscriptionManager.INVALID_SUBSCRIPTION_ID
++
++        return dialogBuilder()
++            .setTitle(
++                getString(
++                    if (isSwitch) R.string.euicc_resolution_no_privileges_switch_title
++                    else R.string.euicc_resolution_no_privileges_title,
++                    callingAppLabel
++                )
++            )
++            .setMessage(
++                getString(
++                    if (isSwitch) R.string.euicc_resolution_no_privileges_switch_message
++                    else R.string.euicc_resolution_no_privileges_message,
++                    callingAppLabel
++                )
++            )
++            .setNegativeButton(R.string.euicc_resolution_deny) { _, _ -> resolve(false) }
++            .setPositiveButton(R.string.euicc_resolution_allow) { _, _ -> resolve(true) }
++            .create()
++    }
++
++    private fun createDeactivateSimDialog(): AlertDialog =
++        dialogBuilder()
++            .setTitle(R.string.euicc_resolution_deactivate_sim_title)
++            .setMessage(getString(R.string.euicc_resolution_deactivate_sim_message, callingAppLabel))
++            .setNegativeButton(R.string.euicc_resolution_cancel) { _, _ -> resolve(false) }
++            .setPositiveButton(R.string.euicc_resolution_continue) { _, _ -> resolve(true) }
++            .create()
++
++    private fun createResolvableErrorsDialog(): AlertDialog {
++        val errors = intent.getIntExtra(EuiccService.EXTRA_RESOLVABLE_ERRORS, 0)
++        val needsCode = errors and EuiccService.RESOLVABLE_ERROR_CONFIRMATION_CODE != 0
++        val needsPolicyRules = errors and EuiccService.RESOLVABLE_ERROR_POLICY_RULES != 0
++
++        val message = listOfNotNull(
++            if (needsCode) getString(
++                R.string.euicc_resolution_confirmation_code_message,
++                callingAppLabel
++            ) else null,
++            if (needsPolicyRules) getString(R.string.euicc_resolution_policy_rules_message) else null,
++        ).joinToString("\n\n")
++
++        val codeView: View? = if (needsCode) {
++            layoutInflater.inflate(R.layout.dialog_euicc_resolution_code, null).also { view ->
++                if (intent.getBooleanExtra(
++                        EuiccService.EXTRA_RESOLUTION_CONFIRMATION_CODE_RETRIED,
++                        false
++                    )
++                ) {
++                    view.requireViewById<TextInputLayout>(R.id.euicc_resolution_code_layout).error =
++                        getString(R.string.euicc_resolution_confirmation_code_retry)
++                }
++            }
++        } else {
++            null
++        }
++        val codeInput = codeView?.requireViewById<EditText>(R.id.euicc_resolution_code)
++
++        val dialog = dialogBuilder()
++            .setTitle(R.string.euicc_resolution_resolvable_errors_title)
++            .setMessage(message)
++            .setView(codeView)
++            .setNegativeButton(R.string.euicc_resolution_cancel) { _, _ -> resolve(false) }
++            .setPositiveButton(R.string.euicc_resolution_continue) { _, _ ->
++                resolve(true, Bundle().apply {
++                    if (needsCode) {
++                        putString(
++                            EuiccService.EXTRA_RESOLUTION_CONFIRMATION_CODE,
++                            codeInput?.text?.toString()?.trim()
++                        )
++                    }
++                    if (needsPolicyRules) {
++                        putBoolean(EuiccService.EXTRA_RESOLUTION_ALLOW_POLICY_RULES, true)
++                    }
++                })
++            }
++            .create()
++
++        if (codeInput != null) {
++            // Require a non-empty confirmation code; the platform fails the operation otherwise
++            dialog.setOnShowListener {
++                val positive = dialog.getButton(DialogInterface.BUTTON_POSITIVE)
++                positive.isEnabled = !codeInput.text.isNullOrBlank()
++                codeInput.doAfterTextChanged { positive.isEnabled = !it.isNullOrBlank() }
++            }
++        }
++
++        return dialog
++    }
++
++    /**
++     * Report the user's decision to the platform, which then continues (or fails) the pending
++     * operation, and finish.
++     */
++    private fun resolve(consent: Boolean, extras: Bundle = Bundle()) {
++        if (resolved) return
++        resolved = true
++
++        val resolutionExtras = Bundle(extras).apply {
++            putBoolean(EuiccService.EXTRA_RESOLUTION_CONSENT, consent)
++            // For RESOLVE_NO_PRIVILEGES the platform may ask us to pick the port to use
++            // (the intent carries an invalid port index in that case). Our eUICC ports are
++            // interchangeable for the purpose of the platform, so just use the default port.
++            if (intent.action == EuiccService.ACTION_RESOLVE_NO_PRIVILEGES &&
++                intent.getIntExtra(
++                    EuiccService.EXTRA_RESOLUTION_PORT_INDEX,
++                    TelephonyManager.DEFAULT_PORT_INDEX
++                ) < 0
++            ) {
++                putInt(EuiccService.EXTRA_RESOLUTION_PORT_INDEX, TelephonyManager.DEFAULT_PORT_INDEX)
++            }
++        }
++
++        Log.i(TAG, "Resolution ${intent.action} for $resolutionCallingPackage: consent=$consent")
++
++        try {
++            val cardId = intent.getIntExtra(
++                EuiccService.EXTRA_RESOLUTION_CARD_ID,
++                TelephonyManager.UNSUPPORTED_CARD_ID
++            )
++            val euiccManager = getSystemService(EuiccManager::class.java)!!.let {
++                if (cardId >= 0) it.createForCardId(cardId) else it
++            }
++            euiccManager.continueOperation(intent, resolutionExtras)
++        } catch (e: Exception) {
++            Log.e(TAG, "Unable to continue eUICC operation", e)
++        }
++
++        setResult(if (consent) RESULT_OK else RESULT_CANCELED)
++        if (!isFinishing) {
++            finish()
++        }
++    }
++}
+diff --git a/app/src/main/res/layout/dialog_euicc_resolution_code.xml b/app/src/main/res/layout/dialog_euicc_resolution_code.xml
+new file mode 100644
+index 0000000..dd36aa4
+--- /dev/null
++++ b/app/src/main/res/layout/dialog_euicc_resolution_code.xml
+@@ -0,0 +1,25 @@
++<?xml version="1.0" encoding="utf-8"?>
++<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:layout_width="match_parent"
++    android:layout_height="wrap_content"
++    android:orientation="vertical"
++    android:paddingStart="24dp"
++    android:paddingTop="8dp"
++    android:paddingEnd="24dp">
++
++    <com.google.android.material.textfield.TextInputLayout
++        android:id="@+id/euicc_resolution_code_layout"
++        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:hint="@string/euicc_resolution_confirmation_code_hint">
++
++        <com.google.android.material.textfield.TextInputEditText
++            android:id="@+id/euicc_resolution_code"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:importantForAutofill="no"
++            android:inputType="textNoSuggestions|textVisiblePassword"
++            android:maxLines="1" />
++    </com.google.android.material.textfield.TextInputLayout>
++</LinearLayout>
+diff --git a/app/src/main/res/values-nl/strings.xml b/app/src/main/res/values-nl/strings.xml
+new file mode 100644
+index 0000000..5e6a43b
+--- /dev/null
++++ b/app/src/main/res/values-nl/strings.xml
+@@ -0,0 +1,20 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <!-- eUICC resolution (user consent) dialogs, shown on behalf of apps using EuiccManager -->
++    <string name="euicc_resolution_unknown_app">Een app</string>
++    <string name="euicc_resolution_no_privileges_title">%1$s toestaan een eSIM te downloaden?</string>
++    <string name="euicc_resolution_no_privileges_message">%1$s wil een mobiel netwerkprofiel (eSIM) naar dit apparaat downloaden en inschakelen. Hierdoor kan het profiel dat nu op de eSIM in gebruik is, worden uitgeschakeld.\n\nSta dit alleen toe als je deze app vertrouwt.</string>
++    <string name="euicc_resolution_no_privileges_switch_title">%1$s toestaan je eSIM te wisselen?</string>
++    <string name="euicc_resolution_no_privileges_switch_message">%1$s wil een ander mobiel netwerkprofiel op je eSIM inschakelen. Het profiel dat nu op de eSIM in gebruik is, wordt uitgeschakeld.</string>
++    <string name="euicc_resolution_allow">Toestaan</string>
++    <string name="euicc_resolution_deny">Niet toestaan</string>
++    <string name="euicc_resolution_deactivate_sim_title">Huidig mobiel netwerk uitschakelen?</string>
++    <string name="euicc_resolution_deactivate_sim_message">Om door te gaan moet %1$s het mobiele netwerkprofiel uitschakelen dat nu op deze simkaart in gebruik is. Je kunt het later weer inschakelen.</string>
++    <string name="euicc_resolution_continue">Doorgaan</string>
++    <string name="euicc_resolution_cancel">Annuleren</string>
++    <string name="euicc_resolution_resolvable_errors_title">Aanvullende bevestiging nodig</string>
++    <string name="euicc_resolution_confirmation_code_message">Voer de bevestigingscode van je provider in om de eSIM te downloaden waar %1$s om vraagt.</string>
++    <string name="euicc_resolution_confirmation_code_retry">De bevestigingscode was onjuist. Probeer het opnieuw.</string>
++    <string name="euicc_resolution_confirmation_code_hint">Bevestigingscode</string>
++    <string name="euicc_resolution_policy_rules_message">Dit eSIM-profiel bevat beleidsregels van de provider, die bijvoorbeeld kunnen voorkomen dat het profiel wordt uitgeschakeld of verwijderd. Ga alleen door als je hiermee akkoord gaat.</string>
++</resources>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 0e25db7..42aa74b 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -23,6 +23,24 @@
+     <string name="lui_skip">Skip</string>
+     <string name="lui_download">Download eSIM</string>
+ 
++    <!-- eUICC resolution (user consent) dialogs, shown on behalf of apps using EuiccManager -->
++    <string name="euicc_resolution_unknown_app">An app</string>
++    <string name="euicc_resolution_no_privileges_title">Allow %1$s to download an eSIM?</string>
++    <string name="euicc_resolution_no_privileges_message">%1$s wants to download a mobile network profile (eSIM) to this device and turn it on. This may turn off the profile currently in use on the eSIM.\n\nOnly allow this if you trust this app.</string>
++    <string name="euicc_resolution_no_privileges_switch_title">Allow %1$s to switch your eSIM?</string>
++    <string name="euicc_resolution_no_privileges_switch_message">%1$s wants to turn on another mobile network profile on your eSIM. The profile currently in use on the eSIM will be turned off.</string>
++    <string name="euicc_resolution_allow">Allow</string>
++    <string name="euicc_resolution_deny">Don\'t allow</string>
++    <string name="euicc_resolution_deactivate_sim_title">Turn off current mobile network?</string>
++    <string name="euicc_resolution_deactivate_sim_message">To continue, %1$s needs to turn off the mobile network profile currently in use on this SIM. You can turn it back on later.</string>
++    <string name="euicc_resolution_continue">Continue</string>
++    <string name="euicc_resolution_cancel">Cancel</string>
++    <string name="euicc_resolution_resolvable_errors_title">Additional confirmation needed</string>
++    <string name="euicc_resolution_confirmation_code_message">Enter the confirmation code provided by your carrier to download the eSIM requested by %1$s.</string>
++    <string name="euicc_resolution_confirmation_code_retry">The confirmation code was incorrect. Please try again.</string>
++    <string name="euicc_resolution_confirmation_code_hint">Confirmation code</string>
++    <string name="euicc_resolution_policy_rules_message">This eSIM profile contains carrier policy rules, which may for example prevent turning it off or deleting it. Continue only if you agree.</string>
++
+     <!-- Preference -->
+     <string name="pref_advanced_telephony_manager_removable">Use TelephonyManager everywhere</string>
+     <string name="pref_advanced_telephony_manager_removable_desc">By default, only OMAPI is attempted for removable eSIMs to match what is done in unprivileged mode (i.e. EasyEUICC). This may not work well on some devices. Select this option to force the use of TelephonyManager even for removable eSIMs.</string>
+-- 
+2.55.0
+
