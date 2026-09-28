@@ -150,7 +150,7 @@ The carrier app uses `EuiccManager.downloadSubscription()`. With OpenEUICC as th
 - `EuiccResolutionActivity` (the consent dialog);
 - don't report a finished download as failed when only the enable step failed.
 
-Submitted upstream: [PeterCxy/OpenEUICC#358](https://gitea.angry.im/PeterCxy/OpenEUICC/pulls/358), [`patches/openeuicc/euiccservice-carrier-app-download`](patches/openeuicc/euiccservice-carrier-app-download) (upstream submission pending).
+Submitted upstream: [PeterCxy/OpenEUICC#358](https://gitea.angry.im/PeterCxy/OpenEUICC/pulls/358), [PeterCxy/OpenEUICC#360](https://gitea.angry.im/PeterCxy/OpenEUICC/pulls/360).
 
 ### Symptom 4: download fails at the last step with 6A80
 
@@ -200,7 +200,7 @@ You can make that call with OpenEUICC's slot-mapping screen or with a privileged
 - [exy2100/android_device_samsung_universal2100-common#5](https://github.com/exy2100/android_device_samsung_universal2100-common/pull/5) (RIL shim + slot switch + prop label)
 - [exy2100/proprietary_vendor_samsung_universal2100-common#1](https://github.com/exy2100/proprietary_vendor_samsung_universal2100-common/pull/1) (vendor blob rename)
 - [exy2100/android_device_samsung_o1s#3](https://github.com/exy2100/android_device_samsung_o1s/pull/3) (o1s: OpenEUICC + `android.hardware.telephony.euicc`)
-- [PeterCxy/OpenEUICC#358](https://gitea.angry.im/PeterCxy/OpenEUICC/pulls/358), [PeterCxy/OpenEUICC#359](https://gitea.angry.im/PeterCxy/OpenEUICC/pulls/359), [`patches/openeuicc/euiccservice-carrier-app-download`](patches/openeuicc/euiccservice-carrier-app-download) (upstream submission pending) (OpenEUICC)
+- [PeterCxy/OpenEUICC#358](https://gitea.angry.im/PeterCxy/OpenEUICC/pulls/358), [PeterCxy/OpenEUICC#359](https://gitea.angry.im/PeterCxy/OpenEUICC/pulls/359), [PeterCxy/OpenEUICC#360](https://gitea.angry.im/PeterCxy/OpenEUICC/pulls/360) (OpenEUICC)
 
 ---
 
@@ -393,7 +393,7 @@ Placeholders like [exy2100/android_device_samsung_universal2100-common#5](https:
 | [#11](https://github.com/exy2100/android_kernel_samsung_universal2100/pull/11) | exy2100 kernel | console-ramoops | open |
 | [OpenEUICC#358](https://gitea.angry.im/PeterCxy/OpenEUICC/pulls/358) | OpenEUICC (gitea.angry.im) | `shouldIgnoreSlot` fix | open |
 | [OpenEUICC#359](https://gitea.angry.im/PeterCxy/OpenEUICC/pulls/359) | OpenEUICC | BPP 255-byte blocks (6A80) | open |
-| [OE-14](patches/openeuicc/euiccservice-carrier-app-download) | OpenEUICC | carrier-app download + consent UI (#99) | patch in this repo; upstream pending |
+| [OpenEUICC#360](https://gitea.angry.im/PeterCxy/OpenEUICC/pulls/360) | OpenEUICC | carrier-app download + consent UI (#99) | open |
 | [LineageOS Gerrit 505199](https://review.lineageos.org/c/LineageOS/android_vendor_apn/+/505199) | LineageOS vendor/apn | KPN IMS APN | in review |
 | [#6](https://github.com/exy2100/android_device_samsung_universal2100-common/pull/6) | exy2100 universal2100-common | VoLTE integration (RFC) | open |
 | [LineageOS Gerrit 505200](https://review.lineageos.org/c/LineageOS/android_packages_services_Telephony/+/505200) | LineageOS Telephony | VoIP audio mode for IMS calls | in review |
