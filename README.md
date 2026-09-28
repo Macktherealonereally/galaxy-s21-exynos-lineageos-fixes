@@ -308,8 +308,8 @@ Either change alone fixes the framework side.
   - a new `EVENT_SAE_KEY` → PMKSA;
   - a PMKSA fallback for SAE stations without a PMKID;
   - `sae_pwe=0` for this mode, as stock does. hostapd logs `SAE: bcmdhd in-dongle SAE does not support H2E; using sae_pwe=0`.
-  - It is built only when the device sets `$(call soong_config_set_bool,wpa_supplicant_8,board_wlan_bcmdhd_sae,true)` (universal2100-common already does), and it only runs for WPA3/SAE hotspots. [PR-22]
-- **Overlay** (universal2100-common): `config_wifi_softap_sae_supported=true`, as stock's `SoftapOverlayWpa3` does. **Only together with the hostapd change.** On its own, WPA3 shows up but nobody can connect. [PR-23]
+  - It is built only when the device sets `$(call soong_config_set_bool,wpa_supplicant_8,board_wlan_bcmdhd_sae,true)` (universal2100-common already does), and it only runs for WPA3/SAE hotspots. [LineageOS Gerrit 505299](https://review.lineageos.org/c/LineageOS/android_external_wpa_supplicant_8/+/505299)
+- **Overlay** (universal2100-common): `config_wifi_softap_sae_supported=true`, as stock's `SoftapOverlayWpa3` does. **Only together with the hostapd change.** On its own, WPA3 shows up but nobody can connect. [exy2100/android_device_samsung_universal2100-common#8](https://github.com/exy2100/android_device_samsung_universal2100-common/pull/8)
 
 **Verified 2026-09-28** (build "Goshawk 10.3"):
 - `SupportedFeatures` 122 → 126.
@@ -344,13 +344,13 @@ It isn't the codecs or `media_profiles` (those are identical to stock). It is a 
 
 ### Fix
 
-- **Camera provider** (`hardware/samsung`, opt-in via `samsungCameraVars.high_fps_video`): [PR-19]
+- **Camera provider** (`hardware/samsung`, opt-in via `samsungCameraVars.high_fps_video`): [LineageOS Gerrit 505300](https://review.lineageos.org/c/LineageOS/android_hardware_samsung/+/505300)
   - advertise the HAL's fixed high fps modes (`[60,60]`);
   - make the AE target fps range a session key;
   - for >30 fps sessions only, add `cameraClient=2` plus `recordingMin/MaxFps` to the session parameters, as the stock camera stack does.
   - ≤30 fps sessions are untouched.
-- **universal2100-common:** enable the flag. [PR-20]
-- **o1s:** Aperture overlay that offers 60 fps **only at 1080p**, the size where the HAL has a 60 fps mode on every camera. [PR-21]
+- **universal2100-common:** enable the flag. [exy2100/android_device_samsung_universal2100-common#7](https://github.com/exy2100/android_device_samsung_universal2100-common/pull/7)
+- **o1s:** Aperture overlay that offers 60 fps **only at 1080p**, the size where the HAL has a 60 fps mode on every camera. [exy2100/android_device_samsung_o1s#5](https://github.com/exy2100/android_device_samsung_o1s/pull/5)
 
 **Verified 2026-09-28** (build "Goshawk 10.2"):
 - Aperture 1080p60, rear camera: **329 frames / 5.48 s = 60.0 fps**, mean frame interval **16.66 ms**, **0 gaps > 25 ms**.
@@ -456,7 +456,7 @@ This is a high-level outline. The exy2100 o1s README (PR #1) has the exact steps
 
 ## Where the patches are
 
-Placeholders like [PR-19] are replaced by links once each PR or Gerrit change is opened. Until then, the patches for the newest fixes are in this repo:
+Placeholders like [LineageOS Gerrit 505300](https://review.lineageos.org/c/LineageOS/android_hardware_samsung/+/505300) are replaced by links once each PR or Gerrit change is opened. Until then, the patches for the newest fixes are in this repo:
 - 60 fps: `patches/lineage-hardware-samsung/` (applies to both LineageOS and exy2100 `hardware/samsung`), `patches/universal2100-common/camera-high-fps-video/`, `patches/o1s/`;
 - WPA3 hotspot: `patches/lineage-wpa-supplicant-8/`, `patches/universal2100-common/wpa3-softap/`.
 
@@ -484,11 +484,11 @@ Placeholders like [PR-19] are replaced by links once each PR or Gerrit change is
 | [#6](https://github.com/exy2100/android_device_samsung_universal2100-common/pull/6) | exy2100 universal2100-common | VoLTE integration (RFC) | open |
 | [LineageOS Gerrit 505200](https://review.lineageos.org/c/LineageOS/android_packages_services_Telephony/+/505200) | LineageOS Telephony | VoIP audio mode for IMS calls | in review |
 | [#1](https://github.com/krazey/ImsMedia/pull/1) | krazey/ImsMedia | uplink capture reopen | open |
-| [PR-19] | LineageOS hardware/samsung (Gerrit) | camera provider: Samsung high fps video modes (60 fps) | prepared |
-| [PR-20] | exy2100 universal2100-common | enable high fps video | prepared |
-| [PR-21] | exy2100 o1s | Aperture: 60 fps at 1080p only | prepared |
-| [PR-22] | LineageOS external/wpa_supplicant_8 (Gerrit) | hostapd: bcmdhd in-dongle SAE SoftAP (WPA3 hotspot) | prepared |
-| [PR-23] | exy2100 universal2100-common | WifiOverlay: WPA3-SAE SoftAP (needs PR-22) | prepared |
+| [LineageOS Gerrit 505300](https://review.lineageos.org/c/LineageOS/android_hardware_samsung/+/505300) | LineageOS hardware/samsung (Gerrit) | camera provider: Samsung high fps video modes (60 fps) | prepared |
+| [exy2100/android_device_samsung_universal2100-common#7](https://github.com/exy2100/android_device_samsung_universal2100-common/pull/7) | exy2100 universal2100-common | enable high fps video | prepared |
+| [exy2100/android_device_samsung_o1s#5](https://github.com/exy2100/android_device_samsung_o1s/pull/5) | exy2100 o1s | Aperture: 60 fps at 1080p only | prepared |
+| [LineageOS Gerrit 505299](https://review.lineageos.org/c/LineageOS/android_external_wpa_supplicant_8/+/505299) | LineageOS external/wpa_supplicant_8 (Gerrit) | hostapd: bcmdhd in-dongle SAE SoftAP (WPA3 hotspot) | prepared |
+| [exy2100/android_device_samsung_universal2100-common#8](https://github.com/exy2100/android_device_samsung_universal2100-common/pull/8) | exy2100 universal2100-common | WifiOverlay: WPA3-SAE SoftAP (needs PR-22) | prepared |
 
 **Credits:**
 - ata-kaner and the exy2100 contributors, for the lineage-23.2 trees.
