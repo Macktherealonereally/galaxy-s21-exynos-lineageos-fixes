@@ -1,0 +1,43 @@
+From 115e90132c6f0ca83aafd2c46ce1e6998e1eea5a Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Sun, 27 Sep 2026 22:30:31 +0200
+Subject: [PATCH] o1s: Aperture: Limit 60 fps video to 1080p
+
+With samsungCameraVars.high_fps_video the camera provider advertises a
+[60, 60] AE target fps range, which Aperture offers for every video
+quality. The HAL's video table only has 60 fps modes for 1080p class
+sizes on all cameras and for 2160p on the rear main/ultra wide and front
+cameras.
+
+Hide 60 fps for 480p and 720p, and for 2160p until 4K60 is validated,
+so the toggle only appears where it records real 60 fps.
+
+Unlike the r9s approach (adding 60 to this overlay), 60 fps is not
+forced here: it only shows up when the provider exposes it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../apps/Aperture/app/src/main/res/values/config.xml      | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/overlay/packages/apps/Aperture/app/src/main/res/values/config.xml b/overlay/packages/apps/Aperture/app/src/main/res/values/config.xml
+index f13c831..5776308 100644
+--- a/overlay/packages/apps/Aperture/app/src/main/res/values/config.xml
++++ b/overlay/packages/apps/Aperture/app/src/main/res/values/config.xml
+@@ -30,5 +30,13 @@ SPDX-License-Identifier: Apache-2.0
+     <string-array name="config_additionalVideoConfigurations">
+         <item>0</item>  <item>sd|hd|fhd|uhd</item>  <item>30</item>
+         <item>1</item>  <item>sd|hd|fhd|uhd</item>  <item>30</item>
++        <!-- The camera provider advertises [60, 60] (samsungCameraVars.high_fps_video), which
++             the HAL delivers at 1080p on every camera. Keep 60 fps off for 480p/720p (no
++             60 fps mode in the HAL's video table) and 2160p (not validated yet). -->
++        <item>0</item>  <item>sd|hd|uhd</item>  <item>-60</item>
++        <item>1</item>  <item>sd|hd|uhd</item>  <item>-60</item>
++        <item>2</item>  <item>sd|hd|uhd</item>  <item>-60</item>
++        <item>3</item>  <item>sd|hd|uhd</item>  <item>-60</item>
++        <item>52</item> <item>sd|hd|uhd</item>  <item>-60</item>
+     </string-array>
+ </resources>
+-- 
+2.55.0
+

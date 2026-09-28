@@ -1,0 +1,43 @@
+From cae18ce768f003c150979dd1b6cd40d76edac853 Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Sun, 27 Sep 2026 22:32:22 +0200
+Subject: [PATCH] exynos2100: WifiOverlay: Enable WPA3-SAE SoftAP
+
+Advertise SOFTAP_FEATURE_WPA3_SAE so Settings offers WPA3-Personal and
+WPA2/WPA3 transition hotspots, as stock does (vendor overlay
+SoftapOverlayWpa3: config_wifi_softap_sae_supported=true).
+
+The BCM4375 firmware runs SAE in the dongle. This requires the hostapd
+change "hostapd: Support bcmdhd in-dongle SAE for SoftAP
+(CONFIG_BRCM_SAE)" in external/wpa_supplicant_8; without it a WPA3
+hotspot comes up but no SAE client can finish the 4-way handshake.
+
+Existing WPA2 hotspot configurations are kept; only a newly generated
+default configuration becomes WPA2/WPA3 transition.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rro_overlays/WifiOverlay/res/values/config.xml | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/rro_overlays/WifiOverlay/res/values/config.xml b/rro_overlays/WifiOverlay/res/values/config.xml
+index a2671ec..8bd26ce 100644
+--- a/rro_overlays/WifiOverlay/res/values/config.xml
++++ b/rro_overlays/WifiOverlay/res/values/config.xml
+@@ -30,6 +30,13 @@
+     <!-- Wifi driver supports IEEE80211AC for softap -->
+     <bool translatable="false" name="config_wifi_softap_ieee80211ac_supported">true</bool>
+ 
++    <!-- Wifi driver supports WPA3 SAE for softap. The BCM4375 dongle runs SAE itself
++         ("sae" firmware feature); hostapd hands it the password with
++         BRCM_VENDOR_SCMD_BCM_PSK and takes the PMK from BRCM_VENDOR_EVENT_SAE_KEY.
++         Needs hostapd built with CONFIG_BRCM_SAE (board_wlan_bcmdhd_sae) including the
++         AP-side support. Same as stock (SoftapOverlayWpa3). -->
++    <bool translatable="false" name="config_wifi_softap_sae_supported">true</bool>
++
+     <!-- Enable ACS (auto channel selection) for softap -->
+     <bool translatable="false" name="config_wifi_softap_acs_supported">false</bool>
+ 
+-- 
+2.55.0
+

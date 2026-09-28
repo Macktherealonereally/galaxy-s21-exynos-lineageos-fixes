@@ -1,10 +1,10 @@
-# Galaxy S21 Exynos (SM-G991B / o1s) on LineageOS 23.2: VoLTE, eSIM, NFC, Wi-Fi fixes
+# Galaxy S21 Exynos (SM-G991B / o1s) on LineageOS 23.2: VoLTE, eSIM, NFC, Wi-Fi, WPA3 hotspot and 60 fps video fixes
 
-*Unofficial LineageOS 23.2 (Android 16) for the Samsung Galaxy S21 5G Exynos 2100 (SM-G991B, codename `o1s`), built from the [exy2100](https://github.com/exy2100) trees. Last updated 2026-09-27.*
+*Unofficial LineageOS 23.2 (Android 16) for the Samsung Galaxy S21 5G Exynos 2100 (SM-G991B, codename `o1s`), built from the [exy2100](https://github.com/exy2100) trees. Last updated 2026-09-28.*
 
 This page collects the fixes we made on top of the exy2100 lineage-23.2 trees, and where they were submitted. It is written for S21 owners, ROM builders, and their AI agents who search for an error string. Each fix is listed as **symptom (the exact log line) → root cause → fix → how it was verified → where the patch is.**
 
-Short version: **VoLTE (with HD voice), SMS over IMS, eSIM (including carrier apps installing their eSIM), NFC, WPA3 and the Wi-Fi country code all work on our builds.** None of it needs Samsung's proprietary IMS. Everything is open source and submitted upstream, with PR links below.
+Short version: **VoLTE (with HD voice), SMS over IMS, eSIM (including carrier apps installing their eSIM), NFC, WPA3, the WPA3 hotspot, 60 fps video recording and the Wi-Fi country code all work on our builds.** None of it needs Samsung's proprietary IMS. Everything is open source and submitted upstream, with PR links below.
 
 > Target device: **SM-G991B** (S21 5G Exynos, `o1s`), on stock firmware base **G991BXXSJHZC2**. The common fixes (`universal2100-common`, kernel) likely also apply to the S21+ (`t2s`), the S21 Ultra (`p3s`) and the S21 FE Exynos (`r9s`), but we only tested o1s.
 
@@ -16,18 +16,19 @@ Short version: **VoLTE (with HD voice), SMS over IMS, eSIM (including carrier ap
 2. [VoLTE / VoWiFi (open-source IMS)](#volte--vowifi-open-source-ims)
 3. [eSIM (tsds2 slot switch + OpenEUICC)](#esim)
 4. [NFC](#nfc)
-5. [Wi-Fi: WPA3 and country code "99"](#wi-fi)
-6. [SELinux enforcing](#selinux-enforcing)
-7. [Smaller fixes](#smaller-fixes)
-8. [Known limitations](#known-limitations)
-9. [How to reproduce (build)](#how-to-reproduce)
-10. [Where the patches are](#where-the-patches-are)
+5. [Wi-Fi: WPA3, WPA3 hotspot and country code "99"](#wi-fi)
+6. [60 fps video recording](#60-fps-video-recording)
+7. [SELinux enforcing](#selinux-enforcing)
+8. [Smaller fixes](#smaller-fixes)
+9. [Known limitations](#known-limitations)
+10. [How to reproduce (build)](#how-to-reproduce)
+11. [Where the patches are](#where-the-patches-are)
 
 ---
 
 ## Status
 
-On our signed `userdebug` builds, SELinux **enforcing**, tested on one SM-G991B between 2026-09-25 and 2026-09-27:
+On our signed `userdebug` builds, SELinux **enforcing**, tested on one SM-G991B between 2026-09-25 and 2026-09-28:
 
 | Feature | Upstream exy2100 build (20260621) | With these fixes | Notes |
 |---|---|---|---|
@@ -35,7 +36,7 @@ On our signed `userdebug` builds, SELinux **enforcing**, tested on one SM-G991B 
 | Wi-Fi WPA2 | ✅ | ✅ | |
 | Wi-Fi **WPA3** (client) | ❌ "Check password" | ✅ | kernel `SAE_OFFLOAD` flag |
 | Wi-Fi country code | ❌ stuck at `99` | ✅ follows SIM (e.g. `NL`) | overlay + kernel |
-| Wi-Fi WPA3 **hotspot** | ❌ | ❌ | needs a hostapd with Broadcom SAE vendor cmds |
+| Wi-Fi WPA3 **hotspot** (WPA3 and WPA2/WPA3) | ❌ | ✅ | [hostapd in-dongle SAE + overlay](#wpa3-hotspot-no-wpa3-option-or-clients-dropped-with-reason-17) |
 | Mobile data, CS calls, SMS | ✅ | ✅ | |
 | **VoLTE** calls (in/out, two-way audio) | ❌ | ✅ | open-source IMS stack |
 | **HD voice (AMR-WB)** | ❌ | ✅ | see [HD icon note](#hd-icon-on-some-calls) |
@@ -46,11 +47,12 @@ On our signed `userdebug` builds, SELinux **enforcing**, tested on one SM-G991B 
 | eSIM install via QR/activation code | ❌ | ✅ | OpenEUICC (set ES10x MSS 255, see below) |
 | eSIM install via **carrier app** | ❌ | ✅ (travel eSIM tested) | OpenEUICC patches |
 | Dual SIM (physical + eSIM active together) | ❌ | ✅ | |
+| Switch eSIM profiles without a reboot | ❌ | ✅ (~3 s) | OpenEUICC "Send refresh command to modem" ON, see [tips](#how-to-switch-sim-2-between-tray-and-esim) |
 | **NFC** (tags) | ❌ never powers on | ✅ | kernel 32-bit ioctls |
 | NFC battery drain (`ABNORMAL_POWER(DPD)`) | ❌ wakeup every ~11 s | ✅ | eSE node permissions |
 | VoIP mic on speakerphone (WhatsApp etc.) | ❌ | ✅ | `txse4.bin` firmware |
 | Fingerprint | ✅ | ✅ | enroll from Settings. Enrolling inside Setup Wizard fails |
-| Camera 60 fps video | ❌ | ❌ | [upstream "won't fix"](#no-60-fps-video) |
+| Camera **60 fps video** (1080p, all cameras) | ❌ | ✅ | [camera provider + overlay](#60-fps-video-recording) |
 | Samsung Pay / Secure Folder / Samsung Pass | ❌ | ❌ | [Knox fuse](#knox-fuse) |
 | USB-C → 3.5 mm DAC | ⚠️ | ⚠️ | detected but silent (audio offload), not fixed here |
 
@@ -194,7 +196,12 @@ You can make that call with OpenEUICC's slot-mapping screen or with a privileged
 
 **Tips:**
 - **Never re-request an eSIM code just because the carrier app showed an error.** Check whether `es10b_load_bound_profile_package 0` appeared in the log first. If it did, the profile is already on the chip: enable it in OpenEUICC, or reboot. Every new download attempt counts against the carrier's limit.
-- After enabling a profile, the modem may need a **reboot or an airplane-mode toggle** before the new line appears. OpenEUICC may show `SwitchingProfilesRefreshException` although the profile *was* enabled.
+- **Switching eSIM profiles without a reboot:** keep OpenEUICC's developer option **"Send refresh command to modem"** switched **ON**. It is on by default. To find it: Settings → Info → tap *App Version* 7× → Developer Options.
+  - With it on, Disable/Enable sends a REFRESH to the eUICC. The RIL reports `UNSOL_SIM_REFRESH`, and SIM 2 disappears and comes back on the new profile within **~3 s**. The tsds2 mux stays on the eSIM.
+  - The Settings → SIMs toggle works this way too.
+  - With it **off**, Android and the chip get out of sync: a later enable fails with ES10c result 2 (`profileNotInDisabledState`) and "Can't switch SIMs". A reboot brings them back in sync.
+- **No "Disable" button in OpenEUICC?** OpenEUICC hides Disable/Delete for the active profile on a *removable* eSIM as a safeguard, and Samsung's RIL reports the S21's built-in eUICC as removable. Enable **Settings → Advanced → "Allow Disabling / Deleting Active Profile"**.
+- If OpenEUICC shows `SwitchingProfilesRefreshException`, check whether the profile *was* switched anyway before retrying.
 
 **PRs:**
 - [exy2100/android_device_samsung_universal2100-common#5](https://github.com/exy2100/android_device_samsung_universal2100-common/pull/5) (RIL shim + slot switch + prop label)
@@ -274,6 +281,87 @@ Either change alone fixes the framework side.
 
 **Verified:** `mDriverCountryCode: NL`, and the kernel logs `wl_notify_regd : regd notified: NL`.
 
+### WPA3 hotspot: no WPA3 option, or clients dropped with reason 17
+
+**Symptoms:**
+- Settings → Hotspot → Security only offers WPA2-Personal. `dumpsys wifi` shows `SupportedFeatures=122`, i.e. no `SOFTAP_FEATURE_WPA3_SAE`. (XDA 4790286 lists this as "Hotspot WPA 3 security".)
+- If WPA3 is enabled with only the overlay, clients authenticate and are then dropped, in a loop. hostapd has no PMK for them: `No PSK for STA trying to use SAE with PMKSA caching`.
+- With the first hostapd fix but H2E still on, WPA3-only clients fail right after 4-way message 3 with **reason 17**. The client's log shows:
+  ```
+  WPA: RSNXE mismatch between Beacon/ProbeResp and EAPOL-Key msg 3/4
+  RSNXE in Beacon/ProbeResp - hexdump(len=0): [NULL]
+  RSNXE in EAPOL-Key msg 3/4 - hexdump(len=3): f4 01 20
+  ```
+
+**Cause:**
+- The BCM4375 firmware runs SAE **inside the dongle**. Its feature list has `sae`, but no `idauth` (4-way offload) and no `extsae` (SAE frames to the host).
+- So hostapd has two jobs:
+  - give the dongle the password (Broadcom vendor command `BRCM_VENDOR_SCMD_BCM_PSK`);
+  - take the PMK back from bcmdhd's `BRCM_VENDOR_EVENT_SAE_KEY` and run the 4-way handshake itself.
+- LineageOS's `external/wpa_supplicant_8` only had this `CONFIG_BRCM_SAE` support for the **client** side (wpa_supplicant), not in hostapd. Samsung's stock hostapd has it.
+- The second problem was H2E. Android's hostapd config uses `sae_pwe=2`, so hostapd put an RSNXE (SAE H2E) into message 3/4. The beacon is built by the firmware, though, and carries **no** RSNXE. The firmware also only does hunting-and-pecking SAE.
+- The kernel needs no change: Samsung's bcmdhd_101_16 already has the AP-side SAE handling.
+
+**Fix:**
+- **hostapd** (LineageOS `external/wpa_supplicant_8`, one change): support bcmdhd in-dongle SAE for SoftAP under `CONFIG_BRCM_SAE`. It adds:
+  - the password vendor command before `START_AP`;
+  - a new `EVENT_SAE_KEY` → PMKSA;
+  - a PMKSA fallback for SAE stations without a PMKID;
+  - `sae_pwe=0` for this mode, as stock does. hostapd logs `SAE: bcmdhd in-dongle SAE does not support H2E; using sae_pwe=0`.
+  - It is built only when the device sets `$(call soong_config_set_bool,wpa_supplicant_8,board_wlan_bcmdhd_sae,true)` (universal2100-common already does), and it only runs for WPA3/SAE hotspots. [PR-22]
+- **Overlay** (universal2100-common): `config_wifi_softap_sae_supported=true`, as stock's `SoftapOverlayWpa3` does. **Only together with the hostapd change.** On its own, WPA3 shows up but nobody can connect. [PR-23]
+
+**Verified 2026-09-28** (build "Goshawk 10.3"):
+- `SupportedFeatures` 122 → 126.
+- A Galaxy Z Flip 8 joined WPA2-Personal, WPA2/WPA3 transition (`key_mgmt` 0x402) and WPA3-Personal (0x400). The 4-way handshake completed each time (`EAPOL-4WAY-HS-COMPLETED`), and the internet worked.
+
+**Other Samsung Exynos/bcmdhd devices** whose firmware does in-dongle SAE (the Galaxy S10/S20/S21/S22 families; the LineageOS trees `exynos9820-common`, `x1s`, `y2s`, `z3s`, `c2s` and `b0s` already set `board_wlan_bcmdhd_sae`) can use the same hostapd change. They only need to set `config_wifi_softap_sae_supported=true` in their WifiOverlay and test. An independent S22 Ultra analysis reached the same conclusion: [hacenbm144-spec/b0s-wpa3-fixes](https://github.com/hacenbm144-spec/b0s-wpa3-fixes).
+
+---
+
+## 60 fps video recording
+
+### Symptom
+
+Every AOSP camera app (Aperture, Open Camera…) records at **30 fps**, even when set to 60. `ffprobe` shows `avg_frame_rate=30/1`. The public fps ranges stop at 30 on every camera:
+
+```
+android.control.aeAvailableTargetFpsRanges (10014): int32[16]
+  [15 15 15 20 ]
+  [20 20 24 24 ]
+  [8 30 10 30 ]
+  [15 30 30 30 ]
+```
+
+The exy2100 XDA thread lists this as a known bug that upstream considered "won't fix". The r9s approach (adding 60 to the Aperture overlay) doesn't work either; its own commit message says "Still not working".
+
+### Cause
+
+It isn't the codecs or `media_profiles` (those are identical to stock). It is a gate **inside Samsung's camera HAL** (`libexynoscamera3.so`):
+- The HAL has real 60 fps modes: 1080p60 on every camera, listed in the vendor tag `samsung.android.scaler.availableVideoConfigurations`.
+- `ExynosCameraConfigurations::m_adjustPreviewFpsRange` only accepts a 31–119 fps range from a **Samsung client**, i.e. when the session parameter `samsung.android.control.cameraClient` marks the Samsung camera app or SDK. Otherwise it **silently keeps 30 fps**.
+- On AOSP, that session parameter never reaches the HAL. `android.request.availableSessionKeys` is empty (Samsung keeps its list in a vendor tag), so the framework drops all Samsung session tags.
+
+### Fix
+
+- **Camera provider** (`hardware/samsung`, opt-in via `samsungCameraVars.high_fps_video`): [PR-19]
+  - advertise the HAL's fixed high fps modes (`[60,60]`);
+  - make the AE target fps range a session key;
+  - for >30 fps sessions only, add `cameraClient=2` plus `recordingMin/MaxFps` to the session parameters, as the stock camera stack does.
+  - ≤30 fps sessions are untouched.
+- **universal2100-common:** enable the flag. [PR-20]
+- **o1s:** Aperture overlay that offers 60 fps **only at 1080p**, the size where the HAL has a 60 fps mode on every camera. [PR-21]
+
+**Verified 2026-09-28** (build "Goshawk 10.2"):
+- Aperture 1080p60, rear camera: **329 frames / 5.48 s = 60.0 fps**, mean frame interval **16.66 ms**, **0 gaps > 25 ms**.
+- Front camera 1080p60: 60.0 fps. The 30 fps control clip: 30.0 fps.
+- logcat: `CamDev-HighFps: patchSessionParams: high fps session [60, 60], cameraClient 2`.
+
+**Notes:**
+- Switching between 30 and 60 briefly restarts the preview.
+- The encoder bitrate still follows the 30 fps profile.
+- 4K60 is allowed by the provider on the rear main/ultra-wide cameras, but it is not validated, so Aperture hides it.
+
 ---
 
 ## SELinux enforcing
@@ -307,10 +395,6 @@ Our builds run **enforcing**. The fixes needed are in [exy2100/android_device_sa
 
 The first boot of any custom image trips the Knox warranty fuse (`ro.boot.warranty_bit=1`) **permanently**. Unlocking the bootloader alone does not trip it. After that, **Samsung Pay/Wallet, Samsung Pass and Secure Folder never work again on that phone**, not even after going back to stock.
 
-### No 60 fps video
-
-Camera recording is limited to 30 fps. Upstream has marked it "won't fix" (the camera stack is too proprietary). Third-party camera apps with their own pipelines may differ.
-
 ### HD icon on some calls
 
 See [above](#hd-icon-on-some-calls). On calls between networks the S21 leg may really be AMR-NB (the network's choice), and the other phone's HD icon only describes *its* leg. This is not a bug in the ROM.
@@ -321,11 +405,10 @@ Not provided, because EVS is patent-encumbered. AMR-WB HD voice works.
 
 ### Other
 
-- WPA3 **hotspot**: unsupported.
 - Fingerprint enrolment fails inside Setup Wizard. Enrol from Settings afterwards.
 - USB-C DACs: reported on XDA as detected but silent (Samsung audio offload path). Not addressed here.
 - After a reboot with both SIMs in use, SIM 1 once stayed out of service until an airplane-mode toggle.
-- After enabling a new eSIM profile, reboot or toggle airplane mode before the new line appears.
+- After enabling a new eSIM profile with OpenEUICC's "Send refresh command to modem" turned off, you need a reboot before the new line appears. Keep it on (see [eSIM tips](#how-to-switch-sim-2-between-tray-and-esim)).
 - `dumpsys secure_element` still shows `eSE1 mIsConnected:false`. This has no user-visible effect, and the eSE power issue itself is fixed.
 
 ---
@@ -357,6 +440,7 @@ This is a high-level outline. The exy2100 o1s README (PR #1) has the exact steps
    ```
    krazey force-pushes, so pin commits. openeuicc-deps HEAD needs SDK 37, which lineage-23.2 doesn't have.
 4. **Apply the patches** from the PRs listed below that aren't merged yet (fetch the PR branches or `git am` them).
+   `external/wpa_supplicant_8` and `hardware/samsung` are not device repos: a `repo sync` drops local commits there. Until the Gerrit changes are merged, keep them on a fork with a `remove-project` in your local manifest, or re-apply the patch after each sync.
 5. **Build:**
    ```sh
    source build/envsetup.sh && breakfast o1s && m bacon
@@ -372,7 +456,9 @@ This is a high-level outline. The exy2100 o1s README (PR #1) has the exact steps
 
 ## Where the patches are
 
-Placeholders like [exy2100/android_device_samsung_universal2100-common#5](https://github.com/exy2100/android_device_samsung_universal2100-common/pull/5) are filled in once each PR is opened.
+Placeholders like [PR-19] are replaced by links once each PR or Gerrit change is opened. Until then, the patches for the newest fixes are in this repo:
+- 60 fps: `patches/lineage-hardware-samsung/` (applies to both LineageOS and exy2100 `hardware/samsung`), `patches/universal2100-common/camera-high-fps-video/`, `patches/o1s/`;
+- WPA3 hotspot: `patches/lineage-wpa-supplicant-8/`, `patches/universal2100-common/wpa3-softap/`.
 
 | Ref | Repo | Topic | Status |
 |---|---|---|---|
@@ -398,6 +484,11 @@ Placeholders like [exy2100/android_device_samsung_universal2100-common#5](https:
 | [#6](https://github.com/exy2100/android_device_samsung_universal2100-common/pull/6) | exy2100 universal2100-common | VoLTE integration (RFC) | open |
 | [LineageOS Gerrit 505200](https://review.lineageos.org/c/LineageOS/android_packages_services_Telephony/+/505200) | LineageOS Telephony | VoIP audio mode for IMS calls | in review |
 | [#1](https://github.com/krazey/ImsMedia/pull/1) | krazey/ImsMedia | uplink capture reopen | open |
+| [PR-19] | LineageOS hardware/samsung (Gerrit) | camera provider: Samsung high fps video modes (60 fps) | prepared |
+| [PR-20] | exy2100 universal2100-common | enable high fps video | prepared |
+| [PR-21] | exy2100 o1s | Aperture: 60 fps at 1080p only | prepared |
+| [PR-22] | LineageOS external/wpa_supplicant_8 (Gerrit) | hostapd: bcmdhd in-dongle SAE SoftAP (WPA3 hotspot) | prepared |
+| [PR-23] | exy2100 universal2100-common | WifiOverlay: WPA3-SAE SoftAP (needs PR-22) | prepared |
 
 **Credits:**
 - ata-kaner and the exy2100 contributors, for the lineage-23.2 trees.
@@ -405,6 +496,7 @@ Placeholders like [exy2100/android_device_samsung_universal2100-common#5](https:
 - krazey, for the open-source IMS stack.
 - PeterCxy and the OpenEUICC/lpac contributors.
 - LineageOS universal9830/s5e9925 maintainers, whose SMSC shim and eSE fix we followed.
+- Tim Zimmermann, for the original bcmdhd SAE support in LineageOS's wpa_supplicant, and hacenbm144-spec, for the independent S22 Ultra WPA3 hotspot analysis.
 - XDA users kyzer.android (NFC ioctl, txse4 root causes), ✦andrew!^~^, AMAZING2545, and everyone who reported bugs in thread 4790286.
 
 ---

@@ -1,0 +1,569 @@
+From 9ba4fd8618ab091cb92605ae253c9bbf0fe56978 Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Sun, 27 Sep 2026 22:29:51 +0200
+Subject: [PATCH] aidl: camera: Expose Samsung high frame rate video modes
+
+Samsung Exynos camera HALs only publish fps ranges up to 30 fps in
+android.control.aeAvailableTargetFpsRanges. Their per-request check
+(ExynosCameraConfigurations::m_adjustPreviewFpsRange) accepts a range
+with a maximum between 31 and 119 fps only if it is part of that same
+sensor table, or if the session was configured by a Samsung client
+through the samsung.android.control.cameraClient session parameter.
+Otherwise the HAL silently keeps the previous range, so apps asking for
+[60, 60] record at 30 fps. On AOSP no Samsung session parameter ever
+reaches the HAL anyway: android.request.availableSessionKeys is empty,
+so the framework filters all of them out.
+
+The real video modes are listed in the vendor tag
+samsung.android.scaler.availableVideoConfigurations (width, height,
+min fps, max fps, ...). When samsungCameraVars.high_fps_video is set:
+
+ - Add the fixed high fps modes of that table (e.g. [60, 60]) to
+   aeAvailableTargetFpsRanges and lower the minimum frame durations of
+   the matching PRIVATE/YUV sizes.
+ - Make CONTROL_AE_TARGET_FPS_RANGE a session key, so the framework
+   passes it to configure_streams and reconfigures the session when an
+   app switches to or from a high fps range.
+ - For sessions with such a range, add cameraClient
+   (samsungCameraVars.high_fps_video_client, default 2: Samsung SDK
+   client) and recordingMinFps/recordingMaxFps to the session
+   parameters, like the stock camera stack does.
+ - Only ask for a reconfiguration when the effective high fps range
+   changes, so switching between normal ranges stays seamless.
+
+Sessions at 30 fps or below and constrained high speed sessions are
+left untouched. The vendor tags are resolved by name, and nothing
+changes if the HAL does not provide them.
+
+Tested on a Galaxy S21 (SM-G991B, Exynos 2100) with Aperture: 1080p60
+on the rear and front cameras records 60.0 fps (mean frame interval
+16.66 ms, no gaps over 25 ms); 30 fps recording is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Change-Id: I3f677f24054191fdb0976ea8ee4a66a9b0f4de76
+---
+ aidl/camera/device/Android.bp              |   8 +
+ aidl/camera/device/CameraDevice.cpp        |  19 ++
+ aidl/camera/device/CameraDeviceSession.cpp |  40 +++
+ aidl/camera/device/SamsungHighFpsVideo.cpp | 303 +++++++++++++++++++++
+ aidl/camera/device/SamsungHighFpsVideo.h   |  59 ++++
+ 5 files changed, 429 insertions(+)
+ create mode 100644 aidl/camera/device/SamsungHighFpsVideo.cpp
+ create mode 100644 aidl/camera/device/SamsungHighFpsVideo.h
+
+diff --git a/aidl/camera/device/Android.bp b/aidl/camera/device/Android.bp
+index 7168f5c..a39e52c 100644
+--- a/aidl/camera/device/Android.bp
++++ b/aidl/camera/device/Android.bp
+@@ -11,9 +11,17 @@ cc_library_shared {
+         "samsung_camera3_defaults",
+     ],
+     vendor: true,
++    cppflags: select(soong_config_variable("samsungCameraVars", "high_fps_video"), {
++        true: ["-DCAMERA_HIGH_FPS_VIDEO"],
++        default: [],
++    }) + select(soong_config_variable("samsungCameraVars", "high_fps_video_client"), {
++        any @ flag_val: ["-DCAMERA_HIGH_FPS_VIDEO_CLIENT=" + flag_val],
++        default: [],
++    }),
+     srcs: [
+         "CameraDevice.cpp",
+         "CameraDeviceSession.cpp",
++        "SamsungHighFpsVideo.cpp",
+         "convert.cpp",
+     ],
+     shared_libs: [
+diff --git a/aidl/camera/device/CameraDevice.cpp b/aidl/camera/device/CameraDevice.cpp
+index b8764a6..9ba0ac0 100644
+--- a/aidl/camera/device/CameraDevice.cpp
++++ b/aidl/camera/device/CameraDevice.cpp
+@@ -9,6 +9,10 @@
+ #include "CameraDevice.h"
+ #include "convert.h"
+ 
++#ifdef CAMERA_HIGH_FPS_VIDEO
++#include "SamsungHighFpsVideo.h"
++#endif
++
+ #include <cutils/trace.h>
+ 
+ namespace android {
+@@ -79,7 +83,18 @@ ndk::ScopedAStatus CameraDevice::getCameraCharacteristics(CameraMetadata* _aidl_
+                 metadata.update(ANDROID_FLASH_INFO_STRENGTH_MAXIMUM_LEVEL, &torchStrengthLevels, 1);
+             }
+ 
++#ifdef CAMERA_HIGH_FPS_VIDEO
++            // The static metadata buffer is owned by the HAL and entries are added here, which
++            // may reallocate it: patch a copy instead.
++            SamsungHighFpsVideo::init(mModule);
++            common::helper::CameraMetadata patched(clone_camera_metadata(metadata.release()));
++            SamsungHighFpsVideo::patchCharacteristics(&patched);
++            const camera_metadata_t* patchedRaw = patched.getAndLock();
++            convertToAidl(patchedRaw, _aidl_return);
++            patched.unlock(patchedRaw);
++#else
+             convertToAidl(metadata.release(), _aidl_return);
++#endif
+         } else {
+             ALOGE("%s: get camera info failed!", __FUNCTION__);
+             status = Status::INTERNAL_ERROR;
+@@ -326,6 +341,10 @@ ndk::ScopedAStatus CameraDevice::open(const std::shared_ptr<ICameraDeviceCallbac
+             return fromStatus(Status::ILLEGAL_ARGUMENT);
+         }
+ 
++#ifdef CAMERA_HIGH_FPS_VIDEO
++        SamsungHighFpsVideo::init(mModule);
++#endif
++
+         session = createSession(device, info.static_camera_characteristics, in_callback);
+         if (session == nullptr) {
+             ALOGE("%s: camera device session allocation failed", __FUNCTION__);
+diff --git a/aidl/camera/device/CameraDeviceSession.cpp b/aidl/camera/device/CameraDeviceSession.cpp
+index 8eb512e..7fdebc5 100644
+--- a/aidl/camera/device/CameraDeviceSession.cpp
++++ b/aidl/camera/device/CameraDeviceSession.cpp
+@@ -9,6 +9,10 @@
+ 
+ #include "CameraDeviceSession.h"
+ 
++#ifdef CAMERA_HIGH_FPS_VIDEO
++#include "SamsungHighFpsVideo.h"
++#endif
++
+ #include <SamsungCameraModule.h>
+ #include <aidl/android/hardware/camera/device/ErrorMsg.h>
+ #include <aidl/android/hardware/camera/device/ShutterMsg.h>
+@@ -893,6 +897,22 @@ ndk::ScopedAStatus CameraDeviceSession::configureStreams(
+         convertFromAidl(in_requestedConfiguration.sessionParams, &paramBuffer);
+     }
+ 
++#ifdef CAMERA_HIGH_FPS_VIDEO
++    // Translate a high fps AE target range into the Samsung session parameters the HAL needs
++    // to leave its 30 fps sensor modes. Must stay alive until configure_streams returns.
++    ::android::hardware::camera::common::helper::CameraMetadata highFpsParams;
++    bool highFpsParamsLocked = false;
++    if (paramBuffer != nullptr &&
++        in_requestedConfiguration.operationMode ==
++                ::aidl::android::hardware::camera::device::StreamConfigurationMode::NORMAL_MODE) {
++        highFpsParams = paramBuffer;  // clones
++        if (SamsungHighFpsVideo::patchSessionParams(&highFpsParams)) {
++            paramBuffer = highFpsParams.getAndLock();
++            highFpsParamsLocked = true;
++        }
++    }
++#endif
++
+     camera3_stream_configuration_t stream_list{};
+     // Block reading mStreamConfigCounter until configureStream returns
+     Mutex::Autolock _sccl(mStreamConfigCounterLock);
+@@ -907,6 +927,12 @@ ndk::ScopedAStatus CameraDeviceSession::configureStreams(
+     status_t ret = mDevice->ops->configure_streams(mDevice, &stream_list);
+     ATRACE_END();
+ 
++#ifdef CAMERA_HIGH_FPS_VIDEO
++    if (highFpsParamsLocked) {
++        highFpsParams.unlock(paramBuffer);
++    }
++#endif
++
+     // In case Hal returns error most likely it was not able to release
+     // the corresponding resources of the deleted streams.
+     if (ret == OK) {
+@@ -1145,6 +1171,20 @@ ndk::ScopedAStatus CameraDeviceSession::isReconfigurationRequired(
+         bool* _aidl_return) {
+     // reconfiguration required if there is any change in the session params
+     *_aidl_return = in_oldSessionParams != in_newSessionParams;
++
++#ifdef CAMERA_HIGH_FPS_VIDEO
++    // The AE target fps range is only a session key so that high fps video can be configured.
++    // Don't restart the pipeline when an app merely switches between normal (<= 30 fps) ranges.
++    if (*_aidl_return) {
++        const camera_metadata_t* oldParams = nullptr;
++        const camera_metadata_t* newParams = nullptr;
++        if (convertFromAidl(in_oldSessionParams, &oldParams) &&
++            convertFromAidl(in_newSessionParams, &newParams)) {
++            *_aidl_return = SamsungHighFpsVideo::isReconfigurationRequired(oldParams, newParams);
++        }
++    }
++#endif
++
+     return fromStatus(Status::OK);
+ }
+ 
+diff --git a/aidl/camera/device/SamsungHighFpsVideo.cpp b/aidl/camera/device/SamsungHighFpsVideo.cpp
+new file mode 100644
+index 0000000..b5323f1
+--- /dev/null
++++ b/aidl/camera/device/SamsungHighFpsVideo.cpp
+@@ -0,0 +1,303 @@
++/*
++ * SPDX-FileCopyrightText: 2026 The LineageOS Project
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#define LOG_TAG "CamDev-HighFps"
++
++#include "SamsungHighFpsVideo.h"
++
++#include <log/log.h>
++#include <system/camera_vendor_tags.h>
++#include <system/graphics-base.h>
++
++#include <algorithm>
++#include <cstring>
++#include <mutex>
++#include <set>
++#include <string>
++#include <utility>
++#include <vector>
++
++#ifndef CAMERA_HIGH_FPS_VIDEO_CLIENT
++// samsung.android.control.cameraClient value injected for high fps sessions. The HAL treats
++// 1 and 5 as the Samsung camera app and 2, 3, 4 and 6 as Samsung camera SDK clients; both
++// lift the 30 fps limit. The SDK path changes the fewest other HAL behaviours.
++#define CAMERA_HIGH_FPS_VIDEO_CLIENT 2
++#endif
++
++namespace android {
++namespace hardware {
++namespace camera {
++namespace device {
++namespace implementation {
++
++using common::helper::CameraMetadata;
++
++namespace {
++
++// samsung.android.scaler.availableVideoConfigurations: (width, height, minFps, maxFps, x, y)
++constexpr size_t kVideoConfigStride = 6;
++// The HAL validates ranges with a maximum in [31, 119]; 120 fps and above is high speed video.
++constexpr int32_t kMinHighFps = 31;
++constexpr int32_t kMaxHighFps = 119;
++constexpr int64_t kNsPerSec = 1000000000LL;
++
++struct SamsungTags {
++    bool valid = false;
++    uint32_t availableVideoConfigurations = 0;
++    uint32_t cameraClient = 0;
++    uint32_t recordingMaxFps = 0;
++    uint32_t recordingMinFps = 0;
++};
++
++std::once_flag sInitFlag;
++SamsungTags sTags;
++
++bool findTag(const vendor_tag_ops_t& ops, const std::vector<uint32_t>& tags, const char* section,
++             const char* name, uint32_t* out) {
++    for (uint32_t tag : tags) {
++        const char* s = ops.get_section_name(&ops, tag);
++        const char* n = ops.get_tag_name(&ops, tag);
++        if (s != nullptr && n != nullptr && strcmp(s, section) == 0 && strcmp(n, name) == 0) {
++            *out = tag;
++            return true;
++        }
++    }
++    return false;
++}
++
++bool hasPair(const camera_metadata_ro_entry& entry, int32_t a, int32_t b) {
++    for (size_t i = 0; i + 1 < entry.count; i += 2) {
++        if (entry.data.i32[i] == a && entry.data.i32[i + 1] == b) {
++            return true;
++        }
++    }
++    return false;
++}
++
++// Returns true if |a| has an entry, other than the AE target fps range, that is missing from
++// or different in |b|.
++bool otherParamsDiffer(const camera_metadata_t* a, const camera_metadata_t* b) {
++    size_t count = a != nullptr ? get_camera_metadata_entry_count(a) : 0;
++    for (size_t i = 0; i < count; i++) {
++        camera_metadata_ro_entry_t ea, eb;
++        if (get_camera_metadata_ro_entry(a, i, &ea) != 0) {
++            return true;
++        }
++        if (ea.tag == ANDROID_CONTROL_AE_TARGET_FPS_RANGE) {
++            continue;
++        }
++        if (b == nullptr || find_camera_metadata_ro_entry(b, ea.tag, &eb) != 0 ||
++            ea.type != eb.type || ea.count != eb.count ||
++            memcmp(ea.data.u8, eb.data.u8, camera_metadata_type_size[ea.type] * ea.count) != 0) {
++            return true;
++        }
++    }
++    return false;
++}
++
++}  // namespace
++
++void SamsungHighFpsVideo::init(const sp<common::helper::SamsungCameraModule>& module) {
++    std::call_once(sInitFlag, [&module]() {
++        if (module == nullptr || !module->isVendorTagDefined()) {
++            return;
++        }
++
++        vendor_tag_ops_t ops{};
++        module->getVendorTagOps(&ops);
++        if (ops.get_tag_count == nullptr || ops.get_all_tags == nullptr ||
++            ops.get_section_name == nullptr || ops.get_tag_name == nullptr) {
++            return;
++        }
++
++        int count = ops.get_tag_count(&ops);
++        if (count <= 0) {
++            return;
++        }
++        std::vector<uint32_t> tags(count);
++        ops.get_all_tags(&ops, tags.data());
++
++        SamsungTags t;
++        t.valid = findTag(ops, tags, "samsung.android.scaler", "availableVideoConfigurations",
++                          &t.availableVideoConfigurations) &&
++                  findTag(ops, tags, "samsung.android.control", "cameraClient", &t.cameraClient) &&
++                  findTag(ops, tags, "samsung.android.control", "recordingMaxFps",
++                          &t.recordingMaxFps) &&
++                  findTag(ops, tags, "samsung.android.control", "recordingMinFps",
++                          &t.recordingMinFps);
++        if (!t.valid) {
++            ALOGW("%s: Samsung video vendor tags not found, high fps video disabled", __FUNCTION__);
++            return;
++        }
++        sTags = t;
++    });
++}
++
++void SamsungHighFpsVideo::patchCharacteristics(CameraMetadata* chars) {
++    if (chars == nullptr || !sTags.valid) {
++        return;
++    }
++    // Read-only view: const find() does not lock the buffer. Entries are invalidated by
++    // update(), so each one is looked up again right before it is used.
++    const CameraMetadata& ro = *chars;
++
++    camera_metadata_ro_entry videoConfigs = ro.find(sTags.availableVideoConfigurations);
++    if (videoConfigs.count == 0 || videoConfigs.count % kVideoConfigStride != 0) {
++        return;
++    }
++
++    // Collect the fixed high frame rates and the sizes supporting them.
++    std::set<int32_t> highFps;
++    std::vector<std::pair<std::pair<int32_t, int32_t>, int32_t>> sizes;  // ((w, h), fps)
++    for (size_t i = 0; i < videoConfigs.count; i += kVideoConfigStride) {
++        const int32_t* c = &videoConfigs.data.i32[i];
++        if (c[2] == c[3] && c[3] >= kMinHighFps && c[3] <= kMaxHighFps) {
++            highFps.insert(c[3]);
++            sizes.push_back({{c[0], c[1]}, c[3]});
++        }
++    }
++    if (highFps.empty()) {
++        return;
++    }
++
++    // 1. Advertise the fixed high fps AE target ranges.
++    camera_metadata_ro_entry ranges = ro.find(ANDROID_CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
++    std::vector<int32_t> newRanges(ranges.data.i32, ranges.data.i32 + ranges.count);
++    for (int32_t fps : highFps) {
++        if (!hasPair(ranges, fps, fps)) {
++            newRanges.push_back(fps);
++            newRanges.push_back(fps);
++        }
++    }
++    if (newRanges.size() != ranges.count) {
++        chars->update(ANDROID_CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES, newRanges.data(),
++                      newRanges.size());
++    }
++
++    // 2. Lower the minimum frame durations of the video capable sizes accordingly.
++    camera_metadata_ro_entry durations = ro.find(ANDROID_SCALER_AVAILABLE_MIN_FRAME_DURATIONS);
++    if (durations.count > 0 && durations.count % 4 == 0) {
++        std::vector<int64_t> newDurations(durations.data.i64, durations.data.i64 + durations.count);
++        bool changed = false;
++        for (size_t i = 0; i < newDurations.size(); i += 4) {
++            int64_t format = newDurations[i];
++            if (format != HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED &&
++                format != HAL_PIXEL_FORMAT_YCBCR_420_888) {
++                continue;
++            }
++            for (const auto& [size, fps] : sizes) {
++                if (newDurations[i + 1] == size.first && newDurations[i + 2] == size.second) {
++                    int64_t minDuration = kNsPerSec / fps;
++                    if (newDurations[i + 3] > minDuration) {
++                        newDurations[i + 3] = minDuration;
++                        changed = true;
++                    }
++                }
++            }
++        }
++        if (changed) {
++            chars->update(ANDROID_SCALER_AVAILABLE_MIN_FRAME_DURATIONS, newDurations.data(),
++                          newDurations.size());
++        }
++    }
++
++    // 3. Make the AE target fps range a session key, so it reaches configure_streams.
++    camera_metadata_ro_entry sessionKeys = ro.find(ANDROID_REQUEST_AVAILABLE_SESSION_KEYS);
++    std::vector<int32_t> newSessionKeys(sessionKeys.data.i32,
++                                        sessionKeys.data.i32 + sessionKeys.count);
++    if (std::find(newSessionKeys.begin(), newSessionKeys.end(),
++                  ANDROID_CONTROL_AE_TARGET_FPS_RANGE) == newSessionKeys.end()) {
++        newSessionKeys.push_back(ANDROID_CONTROL_AE_TARGET_FPS_RANGE);
++        chars->update(ANDROID_REQUEST_AVAILABLE_SESSION_KEYS, newSessionKeys.data(),
++                      newSessionKeys.size());
++
++        camera_metadata_ro_entry charKeys = ro.find(ANDROID_REQUEST_AVAILABLE_CHARACTERISTICS_KEYS);
++        if (charKeys.count > 0) {
++            std::vector<int32_t> newCharKeys(charKeys.data.i32, charKeys.data.i32 + charKeys.count);
++            if (std::find(newCharKeys.begin(), newCharKeys.end(),
++                          ANDROID_REQUEST_AVAILABLE_SESSION_KEYS) == newCharKeys.end()) {
++                newCharKeys.push_back(ANDROID_REQUEST_AVAILABLE_SESSION_KEYS);
++                chars->update(ANDROID_REQUEST_AVAILABLE_CHARACTERISTICS_KEYS, newCharKeys.data(),
++                              newCharKeys.size());
++            }
++        }
++    }
++}
++
++bool SamsungHighFpsVideo::getHighFpsRange(const camera_metadata_t* params, int32_t* minFps,
++                                          int32_t* maxFps) {
++    if (params == nullptr || !sTags.valid) {
++        return false;
++    }
++
++    camera_metadata_ro_entry_t entry;
++    if (find_camera_metadata_ro_entry(params, ANDROID_CONTROL_AE_TARGET_FPS_RANGE, &entry) != 0 ||
++        entry.count != 2) {
++        return false;
++    }
++
++    int32_t lo = entry.data.i32[0];
++    int32_t hi = entry.data.i32[1];
++    if (hi < kMinHighFps || hi > kMaxHighFps || lo <= 0 || lo > hi) {
++        return false;
++    }
++
++    if (minFps != nullptr) *minFps = lo;
++    if (maxFps != nullptr) *maxFps = hi;
++    return true;
++}
++
++bool SamsungHighFpsVideo::patchSessionParams(CameraMetadata* params) {
++    if (params == nullptr || params->isEmpty()) {
++        return false;
++    }
++
++    int32_t minFps, maxFps;
++    {
++        const camera_metadata_t* raw = params->getAndLock();
++        bool isHighFps = getHighFpsRange(raw, &minFps, &maxFps);
++        params->unlock(raw);
++        if (!isHighFps) {
++            return false;
++        }
++    }
++
++    // Respect values explicitly set by the client.
++    if (!params->exists(sTags.cameraClient)) {
++        int32_t client = CAMERA_HIGH_FPS_VIDEO_CLIENT;
++        params->update(sTags.cameraClient, &client, 1);
++    }
++    if (!params->exists(sTags.recordingMaxFps)) {
++        params->update(sTags.recordingMaxFps, &maxFps, 1);
++    }
++    if (!params->exists(sTags.recordingMinFps)) {
++        params->update(sTags.recordingMinFps, &minFps, 1);
++    }
++
++    ALOGI("%s: high fps session [%d, %d], cameraClient %d", __FUNCTION__, minFps, maxFps,
++          CAMERA_HIGH_FPS_VIDEO_CLIENT);
++    return true;
++}
++
++bool SamsungHighFpsVideo::isReconfigurationRequired(const camera_metadata_t* oldParams,
++                                                    const camera_metadata_t* newParams) {
++    if (otherParamsDiffer(oldParams, newParams) || otherParamsDiffer(newParams, oldParams)) {
++        return true;
++    }
++
++    int32_t oldMin = 0, oldMax = 0, newMin = 0, newMax = 0;
++    bool oldHigh = getHighFpsRange(oldParams, &oldMin, &oldMax);
++    bool newHigh = getHighFpsRange(newParams, &newMin, &newMax);
++    if (oldHigh != newHigh) {
++        return true;
++    }
++    return oldHigh && (oldMin != newMin || oldMax != newMax);
++}
++
++}  // namespace implementation
++}  // namespace device
++}  // namespace camera
++}  // namespace hardware
++}  // namespace android
+diff --git a/aidl/camera/device/SamsungHighFpsVideo.h b/aidl/camera/device/SamsungHighFpsVideo.h
+new file mode 100644
+index 0000000..43fdb79
+--- /dev/null
++++ b/aidl/camera/device/SamsungHighFpsVideo.h
+@@ -0,0 +1,59 @@
++/*
++ * SPDX-FileCopyrightText: 2026 The LineageOS Project
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#pragma once
++
++#include <CameraMetadata.h>
++#include <SamsungCameraModule.h>
++#include <system/camera_metadata.h>
++
++namespace android {
++namespace hardware {
++namespace camera {
++namespace device {
++namespace implementation {
++
++/*
++ * Samsung Exynos camera HALs only accept a per-request CONTROL_AE_TARGET_FPS_RANGE with a
++ * maximum between 31 and 119 fps (e.g. [60, 60]) when it is part of the sensor's public fps
++ * range table (which tops out at 30 fps) or when the session was configured by a "Samsung"
++ * client, signalled through the samsung.android.control.cameraClient session parameter.
++ * Otherwise the HAL silently keeps the previous range, so 60 fps video records at 30 fps.
++ *
++ * The HAL does advertise its real video modes in samsung.android.scaler.availableVideoConfigurations
++ * (width, height, minFps, maxFps, ...). This helper:
++ *  - exposes the fixed high frame rates from that table as standard AE target fps ranges and
++ *    fixes the matching minimum frame durations,
++ *  - makes CONTROL_AE_TARGET_FPS_RANGE a session key so the framework hands it to
++ *    configure_streams (and reconfigures when an app switches between 30 and 60 fps),
++ *  - translates a high fps session range into the Samsung session parameters the HAL expects.
++ */
++class SamsungHighFpsVideo {
++  public:
++    // Resolves the Samsung vendor tags from the camera module. Safe to call multiple times.
++    static void init(const sp<common::helper::SamsungCameraModule>& module);
++
++    // Adds the high fps video modes of the HAL to the static characteristics.
++    static void patchCharacteristics(common::helper::CameraMetadata* chars);
++
++    // Returns true and fills |minFps|/|maxFps| if |params| requests a high fps AE range.
++    static bool getHighFpsRange(const camera_metadata_t* params, int32_t* minFps, int32_t* maxFps);
++
++    // Adds the Samsung session parameters matching the requested high fps range to |params|.
++    // Returns false if nothing had to be changed.
++    static bool patchSessionParams(common::helper::CameraMetadata* params);
++
++    // Returns true if a change between two sets of session parameters needs a stream
++    // reconfiguration: any change other than the AE target fps range, or a change of the
++    // effective high fps range.
++    static bool isReconfigurationRequired(const camera_metadata_t* oldParams,
++                                          const camera_metadata_t* newParams);
++};
++
++}  // namespace implementation
++}  // namespace device
++}  // namespace camera
++}  // namespace hardware
++}  // namespace android
+-- 
+2.55.0
+

@@ -1,0 +1,373 @@
+From a100a729831fe856f950c82491e066ae53c4d98f Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Mon, 28 Sep 2026 08:21:12 +0200
+Subject: [PATCH] hostapd: Support bcmdhd in-dongle SAE for SoftAP
+ (CONFIG_BRCM_SAE)
+
+Broadcom dongles that report the "sae" firmware capability (e.g. the
+BCM4375 in Samsung Exynos Galaxy devices with bcmdhd_101_x) do not hand
+SAE Authentication frames to the host and cannot run the 4-way
+handshake themselves (no "idauth"). For an AP interface the dongle runs
+SAE on its own and bcmdhd reports the result with
+BRCM_VENDOR_EVENT_SAE_KEY (peer MAC, PMK, PMKID). wpa_supplicant
+already supports this for STA mode with CONFIG_BRCM_SAE
+(board_wlan_bcmdhd_sae); hostapd did not, so WPA3-Personal and
+WPA2/WPA3 transition hotspots could not work: SAE succeeds in the
+dongle, but hostapd has no PMK for the station and drops it before the
+4-way handshake. Such devices have to keep
+config_wifi_softap_sae_supported=false.
+
+Add the AP side, following the flow of the vendor (Samsung/Broadcom)
+hostapd:
+
+- Build hostapd with CONFIG_BRCM_SAE when board_wlan_bcmdhd_sae is set.
+- beacon.c: provide the SAE password in wpa_driver_ap_params, as for
+  WPA_DRIVER_FLAGS2_SAE_OFFLOAD_AP.
+- driver_nl80211: before the first NL80211_CMD_START_AP, pass the SAE
+  password to the dongle with BRCM_VENDOR_SCMD_BCM_PSK. START_AP then
+  sets the final wpa_auth (SAE, or SAE+PSK) from the RSN element.
+- driver_nl80211_event: in hostapd, turn BRCM_VENDOR_EVENT_SAE_KEY into
+  a new generic EVENT_SAE_KEY instead of poking the STA state machine.
+- drv_callbacks: add the PMKSA for the STA on EVENT_SAE_KEY.
+- wpa_auth_ie: if the STA uses the SAE AKM but lists no known PMKID in
+  its (Re)Association Request, use the PMKSA cached for its address so
+  that the 4-way handshake gets the dongle-derived PMK.
+- ap_config: force sae_pwe=0 (hunting-and-pecking) when sae_pwe=2 is
+  configured. On bcmdhd the Beacon and Probe Response frames are built
+  by the firmware, which does not include the RSNXE that hostapd would
+  add for H2E, while hostapd still sends that RSNXE in EAPOL-Key msg
+  3/4. Clients then reject msg 3/4 and disassociate with reason 17:
+
+    WPA: RSNXE mismatch between Beacon/ProbeResp and EAPOL-Key msg 3/4
+
+  The vendor hostapd's WPA3 SoftAP template sets no sae_pwe either.
+  6 GHz (H2E mandatory) is left alone, and an sae_pwe=1 (H2E-only)
+  configuration only gets a warning.
+
+wpa_supplicant builds are unchanged: the STA path keeps using
+wpa_sm_set_pmk(), and all new AP code is under
+CONFIG_BRCM_SAE && HOSTAPD. Devices without board_wlan_bcmdhd_sae are
+not affected, and on devices with it the new code only runs for SAE
+SoftAP configurations, which the framework offers only when
+config_wifi_softap_sae_supported is set.
+
+Tested on a Galaxy S21 (SM-G991B, BCM4375, firmware 18.41.117) with
+config_wifi_softap_sae_supported=true: a WPA3 phone completed the 4-way
+handshake with WPA2-Personal, WPA2/WPA3 transition and WPA3-Personal
+hotspots.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Change-Id: I74147a696746283e1cd9df00f4e77d5cbbb4f321
+---
+ hostapd/Android.bp                 |  3 +++
+ src/ap/ap_config.c                 | 25 +++++++++++++++++
+ src/ap/beacon.c                    | 17 +++++++++++-
+ src/ap/drv_callbacks.c             | 18 +++++++++++++
+ src/ap/wpa_auth_ie.c               | 15 +++++++++++
+ src/drivers/driver.h               | 26 ++++++++++++++++++
+ src/drivers/driver_common.c        |  1 +
+ src/drivers/driver_nl80211.c       | 23 ++++++++++++++++
+ src/drivers/driver_nl80211_event.c | 43 ++++++++++++++++++++++++++++--
+ 9 files changed, 168 insertions(+), 3 deletions(-)
+
+diff --git a/hostapd/Android.bp b/hostapd/Android.bp
+index 995926a3..001e4f9d 100644
+--- a/hostapd/Android.bp
++++ b/hostapd/Android.bp
+@@ -418,6 +418,9 @@ cc_defaults {
+         "bcmdhd": ["-DCONFIG_DRIVER_NL80211_BRCM"],
+         "synadhd": ["-DCONFIG_DRIVER_NL80211_SYNA"],
+         default: ["-DCONFIG_DRIVER_NL80211_QCA"],
++    }) + select(soong_config_variable("wpa_supplicant_8", "board_wlan_bcmdhd_sae"), {
++        true: ["-DCONFIG_BRCM_SAE"],
++        default: [],
+     }),
+ }
+ 
+diff --git a/src/ap/ap_config.c b/src/ap/ap_config.c
+index f4aab006..54203ed8 100644
+--- a/src/ap/ap_config.c
++++ b/src/ap/ap_config.c
+@@ -1468,6 +1468,31 @@ static int hostapd_config_check_bss(struct hostapd_bss_config *bss,
+ 	}
+ #endif /* CONFIG_SAE_PK */
+ 
++#if defined(CONFIG_SAE) && defined(CONFIG_BRCM_SAE) && defined(HOSTAPD)
++	/*
++	 * bcmdhd in-dongle SAE: the dongle runs SAE (hunting-and-pecking)
++	 * and the firmware builds the Beacon/Probe Response frames. Those
++	 * carry no RSNXE, because the firmware takes no RSNXE from the host
++	 * (bcmdhd's "rsnxe" iovar has no effect). If hostapd advertised
++	 * SAE H2E, its RSNXE would still go into EAPOL-Key msg 3/4. The STA
++	 * would then see an RSNXE mismatch and reject msg 3/4 with reason 17.
++	 * Use hunting-and-pecking only, like the vendor hostapd (whose WPA3
++	 * SoftAP configuration has no sae_pwe). The RSNXE then is not
++	 * advertised anywhere. (H2E is mandatory on 6 GHz; leave that alone.)
++	 */
++	if (full_config && wpa_key_mgmt_sae(bss->wpa_key_mgmt) &&
++	    !is_6ghz_op_class(conf->op_class) &&
++	    bss->sae_pwe == SAE_PWE_BOTH) {
++		wpa_printf(MSG_INFO,
++			   "SAE: bcmdhd in-dongle SAE does not support H2E; using sae_pwe=0");
++		bss->sae_pwe = SAE_PWE_HUNT_AND_PECK;
++	} else if (full_config && wpa_key_mgmt_sae(bss->wpa_key_mgmt) &&
++		   bss->sae_pwe == SAE_PWE_HASH_TO_ELEMENT) {
++		wpa_printf(MSG_WARNING,
++			   "SAE: sae_pwe=1 (H2E only) is not supported by bcmdhd in-dongle SAE; SAE stations will fail");
++	}
++#endif /* CONFIG_SAE && CONFIG_BRCM_SAE && HOSTAPD */
++
+ #ifdef CONFIG_FILS
+ 	if (full_config && bss->fils_discovery_max_int &&
+ 	    (!conf->ieee80211ax || bss->disable_11ax)) {
+diff --git a/src/ap/beacon.c b/src/ap/beacon.c
+index 3bff0ae3..c1a9a360 100644
+--- a/src/ap/beacon.c
++++ b/src/ap/beacon.c
+@@ -2178,6 +2178,21 @@ static u8 * hostapd_fils_discovery(struct hostapd_data *hapd,
+ #endif /* CONFIG_FILS */
+ 
+ 
++#ifdef CONFIG_SAE
++static bool hostapd_drv_sae_offload_ap(struct hostapd_data *hapd)
++{
++#if defined(CONFIG_BRCM_SAE) && defined(HOSTAPD)
++	/* bcmdhd runs SAE in the dongle; the nl80211 driver wrapper passes the
++	 * password down with BRCM_VENDOR_SCMD_BCM_PSK and the PMK comes back
++	 * with EVENT_SAE_KEY. */
++	return true;
++#else /* CONFIG_BRCM_SAE && HOSTAPD */
++	return !!(hapd->iface->drv_flags2 & WPA_DRIVER_FLAGS2_SAE_OFFLOAD_AP);
++#endif /* CONFIG_BRCM_SAE && HOSTAPD */
++}
++#endif /* CONFIG_SAE */
++
++
+ int ieee802_11_build_ap_params(struct hostapd_data *hapd,
+ 			       struct wpa_driver_ap_params *params)
+ {
+@@ -2511,7 +2526,7 @@ int ieee802_11_build_ap_params(struct hostapd_data *hapd,
+ 	if (wpa_key_mgmt_sae(hapd->conf->wpa_key_mgmt |
+ 			     hapd->conf->rsn_override_key_mgmt |
+ 			     hapd->conf->rsn_override_key_mgmt_2) &&
+-	    (hapd->iface->drv_flags2 & WPA_DRIVER_FLAGS2_SAE_OFFLOAD_AP)) {
++	    hostapd_drv_sae_offload_ap(hapd)) {
+ 		if (hostapd_sae_pk_in_use(hapd->conf)) {
+ 			wpa_printf(MSG_ERROR,
+ 				   "SAE PK not supported with SAE offload");
+diff --git a/src/ap/drv_callbacks.c b/src/ap/drv_callbacks.c
+index e7adf916..716f3dc3 100644
+--- a/src/ap/drv_callbacks.c
++++ b/src/ap/drv_callbacks.c
+@@ -2680,6 +2680,24 @@ void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
+ 			wpa_printf(MSG_DEBUG,
+ 				   "No STA info matching port authorized event found");
+ 		break;
++#ifdef CONFIG_SAE
++	case EVENT_SAE_KEY:
++		/* SAE was run by the driver/firmware (e.g., bcmdhd in-dongle
++		 * SAE); cache the PMKSA so that the 4-way handshake after the
++		 * association can use it. */
++		if (!data || !hapd->wpa_auth)
++			break;
++		if (wpa_auth_pmksa_add_sae(hapd->wpa_auth,
++					   data->sae_key_info.peer_mac,
++					   data->sae_key_info.pmk,
++					   data->sae_key_info.pmk_len,
++					   data->sae_key_info.pmkid,
++					   WPA_KEY_MGMT_SAE, false) < 0)
++			wpa_printf(MSG_INFO,
++				   "SAE: Failed to add driver PMKSA for " MACSTR,
++				   MAC2STR(data->sae_key_info.peer_mac));
++		break;
++#endif /* CONFIG_SAE */
+ #ifdef CONFIG_OWE
+ 	case EVENT_UPDATE_DH:
+ 		if (!data)
+diff --git a/src/ap/wpa_auth_ie.c b/src/ap/wpa_auth_ie.c
+index 83ae4e06..ebcc08a0 100644
+--- a/src/ap/wpa_auth_ie.c
++++ b/src/ap/wpa_auth_ie.c
+@@ -1254,6 +1254,21 @@ wpa_validate_wpa_ie(struct wpa_authenticator *wpa_auth,
+ 			break;
+ 		}
+ 	}
++#if defined(CONFIG_BRCM_SAE) && defined(HOSTAPD)
++	/* bcmdhd in-dongle SAE: the firmware ran SAE before this association
++	 * and the PMKSA was added from EVENT_SAE_KEY. The STA does not have to
++	 * list that PMKID in its (Re)Association Request frame, so use the
++	 * PMKSA cached for this STA. */
++	if (!sm->pmksa && sm->wpa_key_mgmt == WPA_KEY_MGMT_SAE) {
++		sm->pmksa = pmksa_cache_auth_get(wpa_auth->pmksa, sm->addr,
++						 NULL);
++		if (sm->pmksa) {
++			wpa_auth_vlogger(wpa_auth, sm->addr, LOGGER_DEBUG,
++					 "SAE: Using driver-provided PMKSA");
++			pmkid = sm->pmksa->pmkid;
++		}
++	}
++#endif /* CONFIG_BRCM_SAE && HOSTAPD */
+ 	for (i = 0; sm->pmksa == NULL && wpa_auth->conf.okc &&
+ 		     i < data.num_pmkid; i++) {
+ 		struct wpa_auth_okc_iter_data idata;
+diff --git a/src/drivers/driver.h b/src/drivers/driver.h
+index 209681ac..909c86a2 100644
+--- a/src/drivers/driver.h
++++ b/src/drivers/driver.h
+@@ -6114,6 +6114,18 @@ enum wpa_event_type {
+ 	 * EVENT_MLD_INTERFACE_FREED - Notification of AP MLD interface removal
+ 	 */
+ 	EVENT_MLD_INTERFACE_FREED,
++
++	/**
++	 * EVENT_SAE_KEY - SAE authentication completed by the driver (AP mode)
++	 *
++	 * Drivers that run SAE in the device firmware for an AP interface (e.g.
++	 * bcmdhd with in-dongle SAE, BRCM_VENDOR_EVENT_SAE_KEY) use this event
++	 * to hand the resulting PMK and PMKID for the peer STA to hostapd, which
++	 * then runs the 4-way handshake with it.
++	 *
++	 * Described in wpa_event_data.sae_key_info.
++	 */
++	EVENT_SAE_KEY,
+ };
+ 
+ 
+@@ -7101,6 +7113,20 @@ union wpa_event_data {
+ 		u8 valid_links;
+ 		struct t2lm_mapping t2lmap[MAX_NUM_MLD_LINKS];
+ 	} t2l_map_info;
++
++	/**
++	 * struct sae_key_info - Data for EVENT_SAE_KEY
++	 * @peer_mac: MAC address of the STA that completed SAE
++	 * @pmk: PMK derived by the driver/firmware
++	 * @pmk_len: Length of @pmk in octets
++	 * @pmkid: PMKID (PMKID_LEN octets)
++	 */
++	struct sae_key_info {
++		const u8 *peer_mac;
++		const u8 *pmk;
++		size_t pmk_len;
++		const u8 *pmkid;
++	} sae_key_info;
+ };
+ 
+ /**
+diff --git a/src/drivers/driver_common.c b/src/drivers/driver_common.c
+index a3a55902..a33988ce 100644
+--- a/src/drivers/driver_common.c
++++ b/src/drivers/driver_common.c
+@@ -101,6 +101,7 @@ const char * event_to_string(enum wpa_event_type event)
+ 	E2S(TID_LINK_MAP);
+ 	E2S(LINK_RECONFIG);
+ 	E2S(MLD_INTERFACE_FREED);
++	E2S(SAE_KEY);
+ 	}
+ 
+ 	return "UNKNOWN";
+diff --git a/src/drivers/driver_nl80211.c b/src/drivers/driver_nl80211.c
+index f8cc9e16..d0fc3cd8 100644
+--- a/src/drivers/driver_nl80211.c
++++ b/src/drivers/driver_nl80211.c
+@@ -5288,6 +5288,29 @@ static int wpa_driver_nl80211_set_ap(void *priv,
+ 	else if (!drv->device_ap_sme && !nl80211_get_wiphy_data_ap(bss))
+ 		return -ENOBUFS;
+ 
++#if defined(CONFIG_BRCM_SAE) && defined(HOSTAPD)
++	/*
++	 * bcmdhd runs SAE in the dongle (BRCM "sae" firmware feature). Hand it
++	 * the password before the AP is started; the resulting PMK comes back
++	 * through BRCM_VENDOR_EVENT_SAE_KEY (EVENT_SAE_KEY). Must be done
++	 * before NL80211_CMD_START_AP, which then sets the final wpa_auth
++	 * (SAE or SAE+PSK) from the RSN element.
++	 */
++	if (!beacon_set && wpa_key_mgmt_sae(params->key_mgmt_suites)) {
++		if (!params->sae_password || !params->sae_password[0])
++			wpa_printf(MSG_ERROR,
++				   "nl80211: No SAE password for BRCM dongle SAE");
++		else if (bcmdhd_set_sae_password(
++				 drv, params->sae_password,
++				 os_strlen(params->sae_password)))
++			wpa_printf(MSG_ERROR,
++				   "nl80211: Failed to set BRCM dongle SAE password");
++		else
++			wpa_printf(MSG_DEBUG,
++				   "nl80211: BRCM dongle SAE password set");
++	}
++#endif /* CONFIG_BRCM_SAE && HOSTAPD */
++
+ 	wpa_hexdump(MSG_DEBUG, "nl80211: Beacon head",
+ 		    params->head, params->head_len);
+ 	wpa_hexdump(MSG_DEBUG, "nl80211: Beacon tail",
+diff --git a/src/drivers/driver_nl80211_event.c b/src/drivers/driver_nl80211_event.c
+index 5ebc2925..ac6ab186 100644
+--- a/src/drivers/driver_nl80211_event.c
++++ b/src/drivers/driver_nl80211_event.c
+@@ -19,7 +19,7 @@
+ #include "common/ieee802_11_defs.h"
+ #include "common/ieee802_11_common.h"
+ #include "driver_nl80211.h"
+-#ifdef CONFIG_BRCM_SAE
++#if defined(CONFIG_BRCM_SAE) && !defined(HOSTAPD)
+ #include "rsn_supp/wpa.h"
+ #include "rsn_supp/wpa_i.h"
+ #include "wpa_supplicant_i.h"
+@@ -3413,6 +3413,44 @@ static void brcm_nl80211_acs_select_ch(struct wpa_driver_nl80211_data *drv,
+ }
+ 
+ #ifdef CONFIG_BRCM_SAE
++#ifdef HOSTAPD
++/*
++ * AP mode: the dongle ran SAE with a STA (BRCM "sae" firmware feature, the
++ * password was set with BRCM_VENDOR_SCMD_BCM_PSK at start AP). Pass the
++ * resulting PMK/PMKID on so that hostapd can run the 4-way handshake.
++ */
++static void brcm_nl80211_sae_key_event(struct wpa_driver_nl80211_data *drv,
++				       const u8 *data, size_t len)
++{
++	struct nlattr *tb[BRCM_SAE_KEY_ATTR_PMKID + 1];
++	union wpa_event_data event;
++
++	wpa_printf(MSG_DEBUG, "nl80211: BRCM SAE key vendor event received");
++
++	if (nla_parse(tb, BRCM_SAE_KEY_ATTR_PMKID, (struct nlattr *) data,
++		      len, NULL) ||
++	    !tb[BRCM_SAE_KEY_ATTR_BSSID] || !tb[BRCM_SAE_KEY_ATTR_PMK] ||
++	    !tb[BRCM_SAE_KEY_ATTR_PMKID] ||
++	    nla_len(tb[BRCM_SAE_KEY_ATTR_BSSID]) != ETH_ALEN ||
++	    nla_len(tb[BRCM_SAE_KEY_ATTR_PMKID]) != PMKID_LEN ||
++	    nla_len(tb[BRCM_SAE_KEY_ATTR_PMK]) < PMK_LEN ||
++	    nla_len(tb[BRCM_SAE_KEY_ATTR_PMK]) > PMK_LEN_MAX) {
++		wpa_printf(MSG_INFO,
++			   "nl80211: Invalid BRCM SAE key vendor event");
++		return;
++	}
++
++	os_memset(&event, 0, sizeof(event));
++	event.sae_key_info.peer_mac = nla_data(tb[BRCM_SAE_KEY_ATTR_BSSID]);
++	event.sae_key_info.pmk = nla_data(tb[BRCM_SAE_KEY_ATTR_PMK]);
++	event.sae_key_info.pmk_len = nla_len(tb[BRCM_SAE_KEY_ATTR_PMK]);
++	event.sae_key_info.pmkid = nla_data(tb[BRCM_SAE_KEY_ATTR_PMKID]);
++	wpa_printf(MSG_DEBUG, "nl80211: BRCM SAE key for " MACSTR " pmk_len=%zu",
++		   MAC2STR(event.sae_key_info.peer_mac),
++		   event.sae_key_info.pmk_len);
++	wpa_supplicant_event(drv->ctx, EVENT_SAE_KEY, &event);
++}
++#else /* HOSTAPD */
+ static void brcm_nl80211_sae_key_event(struct wpa_driver_nl80211_data *drv,
+                                        const u8 *data, size_t len)
+ {
+@@ -3438,7 +3476,8 @@ static void brcm_nl80211_sae_key_event(struct wpa_driver_nl80211_data *drv,
+ 
+ 	wpa_sm_set_pmk(sm, params.pmk, params.pmk_len, params.pmkid, params.bssid);
+ }
+-#endif
++#endif /* HOSTAPD */
++#endif /* CONFIG_BRCM_SAE */
+ 
+ static void nl80211_vendor_event_brcm(struct wpa_driver_nl80211_data *drv,
+ 				      u32 subcmd, u8 *data, size_t len)
+-- 
+2.55.0
+

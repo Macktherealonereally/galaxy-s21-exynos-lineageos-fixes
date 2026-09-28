@@ -1,0 +1,36 @@
+From 15a0c6c7cad8970a5286a5e6f136758028ffa258 Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Sun, 27 Sep 2026 22:30:09 +0200
+Subject: [PATCH] exynos2100: camera: Enable high frame rate video modes
+
+The Exynos 2100 camera HAL supports 60 fps video (e.g. 1080p60 on all
+sensors, 4K60 on the main and ultra wide cameras), but it rejects a
+[60, 60] AE target fps range from non-Samsung clients and only exposes
+ranges up to 30 fps, so every AOSP camera app recorded at 30 fps.
+
+Let the Samsung camera provider expose the HAL's high fps video modes
+and pass the matching Samsung session parameters.
+
+Requires hardware/samsung "aidl: camera: Expose Samsung high frame rate
+video modes".
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ common.mk | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/common.mk b/common.mk
+index a19612e..b3cd112 100644
+--- a/common.mk
++++ b/common.mk
+@@ -85,6 +85,7 @@ PRODUCT_PACKAGES += \
+     libhwjpeg
+ 
+ $(call soong_config_set_bool,samsungCameraVars,usage_64bit,true)
++$(call soong_config_set_bool,samsungCameraVars,high_fps_video,true)
+ 
+ PRODUCT_PACKAGES += \
+     android.hardware.camera.concurrent.prebuilt.xml \
+-- 
+2.55.0
+
