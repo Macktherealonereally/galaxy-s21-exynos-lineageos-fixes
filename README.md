@@ -488,7 +488,7 @@ Placeholders like [LineageOS Gerrit 505300](https://review.lineageos.org/c/Linea
 | [exy2100/android_device_samsung_universal2100-common#7](https://github.com/exy2100/android_device_samsung_universal2100-common/pull/7) | exy2100 universal2100-common | enable high fps video | prepared |
 | [exy2100/android_device_samsung_o1s#5](https://github.com/exy2100/android_device_samsung_o1s/pull/5) | exy2100 o1s | Aperture: 60 fps at 1080p only | prepared |
 | [LineageOS Gerrit 505299](https://review.lineageos.org/c/LineageOS/android_external_wpa_supplicant_8/+/505299) | LineageOS external/wpa_supplicant_8 (Gerrit) | hostapd: bcmdhd in-dongle SAE SoftAP (WPA3 hotspot) | prepared |
-| [exy2100/android_device_samsung_universal2100-common#8](https://github.com/exy2100/android_device_samsung_universal2100-common/pull/8) | exy2100 universal2100-common | WifiOverlay: WPA3-SAE SoftAP (needs PR-22) | prepared |
+| [exy2100/android_device_samsung_universal2100-common#8](https://github.com/exy2100/android_device_samsung_universal2100-common/pull/8) | exy2100 universal2100-common | WifiOverlay: WPA3-SAE SoftAP (needs Gerrit 505299) | open (draft) |
 
 **Credits:**
 - ata-kaner and the exy2100 contributors, for the lineage-23.2 trees.
