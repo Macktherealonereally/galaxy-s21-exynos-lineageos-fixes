@@ -142,7 +142,7 @@ avc: denied { set } for property=persist.ril.esim.slotswitch ... scontext=u:r:ri
 
 The carrier app uses `EuiccManager.downloadSubscription()`. With OpenEUICC as the LPA, several things fail one after another:
 - `EuiccUiDispatcherActivity: Could not resolve activity for intent: Intent { act=android.service.euicc.action.RESOLVE_NO_PRIVILEGES ... }`: there was no consent dialog.
-- Then `onGetDownloadableSubscriptionMetadata` returned an error within ~10 ms, because OpenEUICC's `shouldIgnoreSlot()` is inverted for devices whose only eUICC is reported as *removable* (Samsung's RIL reports the S21's as removable).
+- Then `onGetDownloadableSubscriptionMetadata` returned an error within ~10 ms, because OpenEUICC's `shouldIgnoreSlot()` is inverted for devices whose only eUICC is reported as *removable*. The radio HAL has no "removable" flag, so AOSP treats every SIM slot as removable unless the device lists it in `non_removable_euicc_slots`, and the exy2100 tree didn't.
 - Then `onDownloadSubscription()` was not implemented at all.
 
 **Fix:** OpenEUICC patches:
@@ -200,12 +200,13 @@ You can make that call with OpenEUICC's slot-mapping screen or with a privileged
   - With it on, Disable/Enable sends a REFRESH to the eUICC. The RIL reports `UNSOL_SIM_REFRESH`, and SIM 2 disappears and comes back on the new profile within **~3 s**. The tsds2 mux stays on the eSIM.
   - The Settings → SIMs toggle works this way too.
   - With it **off**, Android and the chip get out of sync: a later enable fails with ES10c result 2 (`profileNotInDisabledState`) and "Can't switch SIMs". A reboot brings them back in sync.
-- **No "Disable" button in OpenEUICC?** OpenEUICC hides Disable/Delete for the active profile on a *removable* eSIM as a safeguard, and Samsung's RIL reports the S21's built-in eUICC as removable. Enable **Settings → Advanced → "Allow Disabling / Deleting Active Profile"**.
+- **No "Disable" button in OpenEUICC?** OpenEUICC hides Disable/Delete for the active profile on a *removable* eSIM as a safeguard. Without the overlay below, Android reports the S21's built-in eUICC as removable, because AOSP treats every slot as removable unless it's listed in `non_removable_euicc_slots`. Fix: the overlay `non_removable_euicc_slots = [1]` ([exy2100/android_device_samsung_universal2100-common#9](https://github.com/exy2100/android_device_samsung_universal2100-common/pull/9)). Without it, enable OpenEUICC's **Settings → Advanced → "Allow Disabling / Deleting Active Profile"**.
 - If OpenEUICC shows `SwitchingProfilesRefreshException`, check whether the profile *was* switched anyway before retrying.
 
 **PRs:**
 - [exy2100/android_device_samsung_universal2100-common#5](https://github.com/exy2100/android_device_samsung_universal2100-common/pull/5) (RIL shim + slot switch + prop label)
 - [exy2100/proprietary_vendor_samsung_universal2100-common#1](https://github.com/exy2100/proprietary_vendor_samsung_universal2100-common/pull/1) (vendor blob rename)
+- [exy2100/android_device_samsung_universal2100-common#9](https://github.com/exy2100/android_device_samsung_universal2100-common/pull/9) (mark the eUICC slot as non-removable)
 - [exy2100/android_device_samsung_o1s#3](https://github.com/exy2100/android_device_samsung_o1s/pull/3) (o1s: OpenEUICC + `android.hardware.telephony.euicc`)
 - [PeterCxy/OpenEUICC#358](https://gitea.angry.im/PeterCxy/OpenEUICC/pulls/358), [PeterCxy/OpenEUICC#359](https://gitea.angry.im/PeterCxy/OpenEUICC/pulls/359), [PeterCxy/OpenEUICC#360](https://gitea.angry.im/PeterCxy/OpenEUICC/pulls/360) (OpenEUICC)
 
