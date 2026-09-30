@@ -1,0 +1,112 @@
+From 09c6f4f090fefaaf7963bf53bae684e4c3ca71da Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Wed, 30 Sep 2026 13:05:06 +0200
+Subject: [PATCH 3/3] aidl: lineage_health: Support the charging limit mode
+
+sec_battery's batt_full_capacity node (sb_full_soc.c) stops charging at
+the given capacity with the buck left on, so the device keeps running
+from the charger, and recharges 2% below it. Writing 100 (or 0) removes
+the limit. This is what One UI's "Protect battery" uses.
+
+Devices opt in with samsungHealthVars.charging_control_supports_limit.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ aidl/lineage_health/Android.bp          |  3 +++
+ aidl/lineage_health/ChargingControl.cpp | 32 +++++++++++++++++++++++++
+ aidl/lineage_health/ChargingControl.h   |  1 +
+ 3 files changed, 36 insertions(+)
+
+diff --git a/aidl/lineage_health/Android.bp b/aidl/lineage_health/Android.bp
+index a9cda7e..bd752fb 100644
+--- a/aidl/lineage_health/Android.bp
++++ b/aidl/lineage_health/Android.bp
+@@ -12,6 +12,9 @@ cc_binary {
+     cflags: select(soong_config_variable("samsungHealthVars", "charging_control_supports_bypass"), {
+         false: [],
+         default: ["-DHEALTH_CHARGING_CONTROL_SUPPORTS_BYPASS"],
++    }) + select(soong_config_variable("samsungHealthVars", "charging_control_supports_limit"), {
++        true: ["-DHEALTH_CHARGING_CONTROL_SUPPORTS_LIMIT"],
++        default: [],
+     }),
+     srcs: [
+         "service.cpp",
+diff --git a/aidl/lineage_health/ChargingControl.cpp b/aidl/lineage_health/ChargingControl.cpp
+index afb012c..f82f6b6 100644
+--- a/aidl/lineage_health/ChargingControl.cpp
++++ b/aidl/lineage_health/ChargingControl.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include <android-base/file.h>
+ #include <android-base/logging.h>
++#include <android-base/parseint.h>
+ #include <android-base/strings.h>
+ 
+ #define LOG_TAG "vendor.lineage.health-service.samsung"
+@@ -55,6 +56,33 @@ ndk::ScopedAStatus ChargingControl::setChargingDeadline(int64_t /* deadline */)
+     return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
+ }
+ 
++#ifdef HEALTH_CHARGING_CONTROL_SUPPORTS_LIMIT
++ndk::ScopedAStatus ChargingControl::getChargingLimit(ChargingLimitInfo* _aidl_return) {
++    std::string content;
++    if (!android::base::ReadFileToString(CHARGING_LIMIT_NODE, &content, true)) {
++        LOG(ERROR) << "Failed to read current charging limit";
++        return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
++    }
++
++    if (!android::base::ParseInt(android::base::Trim(content), &_aidl_return->max)) {
++        LOG(ERROR) << "Unknown charging limit " << content;
++        return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_STATE);
++    }
++
++    return ndk::ScopedAStatus::ok();
++}
++
++ndk::ScopedAStatus ChargingControl::setChargingLimit(const ChargingLimitInfo& limit) {
++    // sec_battery keeps the charger powering the device at the limit and recharges 2% below it,
++    // so there is no min to set. 100 (or 0) removes the limit.
++    if (!android::base::WriteStringToFile(std::to_string(limit.max), CHARGING_LIMIT_NODE, true)) {
++        LOG(ERROR) << "Failed to write to charging limit node: " << strerror(errno);
++        return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
++    }
++
++    return ndk::ScopedAStatus::ok();
++}
++#else
+ ndk::ScopedAStatus ChargingControl::getChargingLimit(ChargingLimitInfo* /* _aidl_return */) {
+     return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
+ }
+@@ -62,6 +90,7 @@ ndk::ScopedAStatus ChargingControl::getChargingLimit(ChargingLimitInfo* /* _aidl
+ ndk::ScopedAStatus ChargingControl::setChargingLimit(const ChargingLimitInfo& /* limit */) {
+     return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
+ }
++#endif
+ 
+ ndk::ScopedAStatus ChargingControl::getSupportedMode(int* _aidl_return) {
+     if (access(CHARGING_ENABLED_NODE, O_RDWR)) {
+@@ -70,6 +99,9 @@ ndk::ScopedAStatus ChargingControl::getSupportedMode(int* _aidl_return) {
+         *_aidl_return = static_cast<int>(ChargingControlSupportedMode::TOGGLE);
+ #ifdef HEALTH_CHARGING_CONTROL_SUPPORTS_BYPASS
+         *_aidl_return |= static_cast<int>(ChargingControlSupportedMode::BYPASS);
++#endif
++#ifdef HEALTH_CHARGING_CONTROL_SUPPORTS_LIMIT
++        *_aidl_return |= static_cast<int>(ChargingControlSupportedMode::LIMIT);
+ #endif
+     }
+     return ndk::ScopedAStatus::ok();
+diff --git a/aidl/lineage_health/ChargingControl.h b/aidl/lineage_health/ChargingControl.h
+index ab6bd34..c6c5378 100644
+--- a/aidl/lineage_health/ChargingControl.h
++++ b/aidl/lineage_health/ChargingControl.h
+@@ -10,6 +10,7 @@
+ #include <aidl/vendor/lineage/health/ChargingLimitInfo.h>
+ 
+ #define CHARGING_ENABLED_NODE "/sys/class/power_supply/battery/charging_enabled"
++#define CHARGING_LIMIT_NODE "/sys/class/power_supply/battery/batt_full_capacity"
+ 
+ namespace aidl {
+ namespace vendor {
+-- 
+2.55.0
+

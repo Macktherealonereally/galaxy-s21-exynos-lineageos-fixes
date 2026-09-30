@@ -1,0 +1,43 @@
+From fd71d3be460e05154e526b039336368072b4e27c Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Wed, 30 Sep 2026 20:14:22 +0200
+Subject: [PATCH] packages: biometrics: Use the device default for screen-off
+ UDFPS
+
+Settings shows "Screen-off Fingerprint Unlock" with
+config_screen_off_udfps_default_on as its default when the user never
+changed it, but BiometricService read the same setting with a
+hard-coded default of 0. On devices that default it to on (exynos2100
+does), Settings showed the toggle as on while the service kept the
+sensor off in AoD. Use the same default in both places.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/org/lineageos/biometrics/BiometricService.java      | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/packages/Biometrics/src/org/lineageos/biometrics/BiometricService.java b/packages/Biometrics/src/org/lineageos/biometrics/BiometricService.java
+index 84d6940..bc0fdc1 100644
+--- a/packages/Biometrics/src/org/lineageos/biometrics/BiometricService.java
++++ b/packages/Biometrics/src/org/lineageos/biometrics/BiometricService.java
+@@ -635,13 +635,15 @@ public class BiometricService extends Service
+ 
+     /**
+      * Read the Screen-Off UDFPS setting for the current user.
+-     * Defaults to OFF (0) if not explicitly set.
++     * Uses the same default as Settings when it was never set.
+      */
+     private boolean isScreenOffUdfpsEnabled() {
++        final boolean defEnabled = getResources().getBoolean(
++                com.android.internal.R.bool.config_screen_off_udfps_default_on);
+         return Settings.Secure.getIntForUser(
+                 getContentResolver(),
+                 SETTING_SCREEN_OFF_UDFPS,
+-                0 /* default off */,
++                defEnabled ? 1 : 0,
+                 UserHandle.USER_CURRENT) != 0;
+     }
+ 
+-- 
+2.55.0
+

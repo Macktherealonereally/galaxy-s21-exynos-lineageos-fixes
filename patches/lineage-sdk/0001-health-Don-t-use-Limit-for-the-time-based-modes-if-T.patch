@@ -1,0 +1,70 @@
+From d8a15e746a0444111d86f68a463bc7a880e06b17 Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Wed, 30 Sep 2026 13:05:06 +0200
+Subject: [PATCH] health: Don't use Limit for the time based modes if Toggle is
+ supported
+
+Limit claims MODE_AUTO and MODE_MANUAL in
+isChargingControlModeSupported() but doesn't implement their
+onBatteryChanged(), so the base class throws "Unsupported operation".
+getProviderForMode() picks Limit for those modes when Deadline isn't
+supported, and updateChargeControl() runs in system_server without a
+catch. So with a HAL that supports LIMIT and TOGGLE (and not DEADLINE),
+system_server crashes as soon as the charger is connected in Auto mode,
+the default. Prefer Toggle there; Limit is still used when it's the only
+option.
+
+As the mode now can switch between providers, disable the previous one
+in setMode(), so that e.g. a charging limit doesn't stay set.
+
+Change-Id: Idd7890dedb34f90b553b5a15bf02b6c82525ae6d
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../health/ChargingControlController.java       | 17 ++++++++++++-----
+ 1 file changed, 12 insertions(+), 5 deletions(-)
+
+diff --git a/lineage/lib/main/java/org/lineageos/platform/internal/health/ChargingControlController.java b/lineage/lib/main/java/org/lineageos/platform/internal/health/ChargingControlController.java
+index b6a99ef2..e27a11c2 100644
+--- a/lineage/lib/main/java/org/lineageos/platform/internal/health/ChargingControlController.java
++++ b/lineage/lib/main/java/org/lineageos/platform/internal/health/ChargingControlController.java
+@@ -148,12 +148,18 @@ public class ChargingControlController extends LineageHealthFeature {
+             return false;
+         }
+ 
+-        mCurrentProvider = getProviderForMode(mode);
++        ChargingControlProvider provider = getProviderForMode(mode);
+ 
+-        if (mCurrentProvider == null) {
++        if (provider == null) {
+             return false;
+         }
+ 
++        // Undo what the previous provider did, e.g. a charging limit set by Limit
++        if (mCurrentProvider != null && mCurrentProvider != provider) {
++            mCurrentProvider.disable();
++        }
++        mCurrentProvider = provider;
++
+         putInt(LineageSettings.System.CHARGING_CONTROL_MODE, mode);
+         return true;
+     }
+@@ -174,12 +180,13 @@ public class ChargingControlController extends LineageHealthFeature {
+             if (mDeadline.isSupported()) {
+                 return mDeadline;
+             }
+-            if (mLimit.isSupported()) {
+-                return mLimit;
+-            }
++            // Limit doesn't implement the time based modes, prefer Toggle if available
+             if (mToggle.isSupported()) {
+                 return mToggle;
+             }
++            if (mLimit.isSupported()) {
++                return mLimit;
++            }
+         }
+ 
+         return null;
+-- 
+2.55.0
+

@@ -1,0 +1,48 @@
+From 2131a521c2e87dec58982c013e542f31f6ba4560 Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Tue, 29 Sep 2026 19:34:45 +0200
+Subject: [PATCH] exynos2100: recovery: Let the USB host see the disconnect
+ before rebinding
+
+Recovery sets sys.usb.config itself (none, then adb, sideload or
+fastboot), so don't bind the adb gadget in late-init first. That only
+added a bind, unbind and immediate rebind at startup, and started adbd
+before recovery decided whether adb should be on.
+
+When recovery switches USB configs (e.g. "Apply from ADB"), the core
+"none" action unbinds the UDC and the next config binds it again right
+away. On the S21 the PC then often fails the first enumeration
+("device not accepting address N, error -71") until the cable is
+replugged. Block init for 0.5 s after the unbind so the next bind,
+which is queued behind it, comes after the host has seen the
+disconnect.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ init/init.exynos2100.recovery.rc | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/init/init.exynos2100.recovery.rc b/init/init.exynos2100.recovery.rc
+index 626fe6d..0b7e995 100644
+--- a/init/init.exynos2100.recovery.rc
++++ b/init/init.exynos2100.recovery.rc
+@@ -15,7 +15,15 @@ on late-init
+     setprop ro.debuggable 1
+     setprop service.adb.root 1
+     setprop sys.usb.configfs 1
+-    setprop sys.usb.config adb
++
++# Recovery sets sys.usb.config itself (none/adb/sideload/fastboot), so don't
++# bind the gadget here. After the core "none" action unbinds the UDC, block
++# init 0.5 s so the next bind (queued behind this) comes after the host has
++# seen the disconnect; a quick rebind seems to cause the PC's first
++# enumeration to fail ("device not accepting address", error -71).
++# `wait` on a path that never exists is just a sleep.
++on property:sys.usb.config=none && property:sys.usb.configfs=1
++    wait /dev/usb_settle_never_exists 0.5
+ 
+ # Set watchdog timer to 40 seconds and pet it every 10 seconds to get a 30 second margin
+ service watchdogd /system/bin/watchdogd 10 30
+-- 
+2.55.0
+

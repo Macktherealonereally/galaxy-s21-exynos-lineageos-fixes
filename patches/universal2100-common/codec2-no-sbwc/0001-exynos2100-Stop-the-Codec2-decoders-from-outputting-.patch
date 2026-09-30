@@ -1,0 +1,56 @@
+From 453e0e0717f1092b205b6560041745a670b0a95b Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Wed, 30 Sep 2026 11:03:57 +0200
+Subject: [PATCH] exynos2100: Stop the Codec2 decoders from outputting SBWC
+ buffers
+
+With vendor.debug.c2.sbwc.enable=true, the Exynos Codec2 decoders
+(hardware/samsung_slsi-linaro/codec2, ExynosUtils::GetCompressedColorType
+-> DecCommonCnv::cnvCompressedColor) use Samsung bandwidth-compressed
+YUV for every IMPLEMENTATION_DEFINED output surface. On exynos2100
+USE_FLEXIBLE_P010 is unset, so that format is
+HAL_PIXEL_FORMAT_EXYNOS_YCbCr_420_SP_M_SBWC. The decoders do not check
+whether the consumer can read that format.
+
+Only the DPU can read SBWC. The Mali GPU cannot. One UI's SurfaceFlinger
+calls the SBWC decompressor HAL before GPU composition, but AOSP
+SurfaceFlinger has no such path. As soon as a video layer falls back to
+client (GPU) composition, RenderEngine samples compressed data as if it
+were plain YUV. Rounded corners always force client composition
+(OutputLayer::isClientCompositionForced), and so can shadows and the
+scaling during PiP enter/exit animations. This is the likely cause of
+the flickering and blocky/pixelated frames in YouTube when the player
+shrinks into PiP (XDA 4790286 #137).
+
+Decode to uncompressed YUV instead. The same change was made in
+exynos1480/android_device_samsung_a55x commit 238b6d680364 ("a55x:
+Disable vendor.debug.c2.sbwc.enable"). The cost is some extra memory
+bandwidth during video playback.
+
+This only affects decoder output. The HWC's own M2M scaler output stays
+SBWC (DEFAULT_MPP_DST_YUV_FORMAT in
+libhwc2.1/platform/exynos2100/ExynosHWCModule.h:48), so this does not
+touch the scaler/FBC error path that Floppy2100 works around in the
+kernel. Encoders and the SBWC decompressor service are unaffected.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ vendor.prop | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/vendor.prop b/vendor.prop
+index 5684f38..e16837f 100644
+--- a/vendor.prop
++++ b/vendor.prop
+@@ -100,7 +100,7 @@ ro.vendor.hw.use_secure_encoder_only=1
+ 
+ ## Codec2
+ ro.vendor.gpu.dataspace=1
+-vendor.debug.c2.sbwc.enable=true
++vendor.debug.c2.sbwc.enable=false
+ debug.c2.use_dmabufheaps=1
+ media.c2.dmabuf.padding=512
+ debug.stagefright.c2inputsurface=-1
+-- 
+2.55.0
+

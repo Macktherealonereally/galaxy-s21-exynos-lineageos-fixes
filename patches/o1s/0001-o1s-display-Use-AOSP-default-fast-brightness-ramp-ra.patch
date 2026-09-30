@@ -1,0 +1,42 @@
+From a1318465b65a1280ee27d73749fba72c33e75d18 Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Wed, 30 Sep 2026 11:03:31 +0200
+Subject: [PATCH] o1s: display: Use AOSP default fast brightness ramp rates
+
+The display config set the "fast" ramp rates to 0.06 per second (in
+HLG-space units). That is slower than the "slow" auto-brightness
+adaptation of most devices and about 12x slower than the AOSP default.
+AOSP uses config_brightness_ramp_rate_fast = 180, which
+BrightnessSynchronizer.brightnessIntToFloat maps to
+(180-1)/(255-1) = 0.7047244. The fast rate is used for
+non-auto-brightness transitions: waking from AoD or dim, user activity
+after the dim timeout, and policy changes. So each of those crawled up
+to the 3 s screenBrightnessRampIncreaseMaxMillis cap.
+
+Restore the AOSP default for the fast rates. The slow rates (0.04/s),
+which pace ambient-light adaptation, and the 3 s caps stay as they
+are.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ configs/display/displayconfig.xml | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/configs/display/displayconfig.xml b/configs/display/displayconfig.xml
+index 07b4f4c..f9a83f0 100644
+--- a/configs/display/displayconfig.xml
++++ b/configs/display/displayconfig.xml
+@@ -34,8 +34,8 @@
+             </point>
+         </sdrHdrRatioMap>
+     </highBrightnessMode>
+-    <screenBrightnessRampFastDecrease>0.06</screenBrightnessRampFastDecrease>
+-    <screenBrightnessRampFastIncrease>0.06</screenBrightnessRampFastIncrease>
++    <screenBrightnessRampFastDecrease>0.7047244</screenBrightnessRampFastDecrease>
++    <screenBrightnessRampFastIncrease>0.7047244</screenBrightnessRampFastIncrease>
+     <screenBrightnessRampSlowDecrease>0.04</screenBrightnessRampSlowDecrease>
+     <screenBrightnessRampSlowIncrease>0.04</screenBrightnessRampSlowIncrease>
+     <screenBrightnessRampIncreaseMaxMillis>3000</screenBrightnessRampIncreaseMaxMillis>
+-- 
+2.55.0
+

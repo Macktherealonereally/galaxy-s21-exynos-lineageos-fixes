@@ -1,0 +1,92 @@
+From 22a805a419c0450939ea13a1346c750382edda63 Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Wed, 30 Sep 2026 11:03:19 +0200
+Subject: [PATCH] exynos2100: overlay: Make waking from AoD restore brightness
+ at once
+
+Waking from AoD took up to ~10 s to reach the normal brightness, and the
+screen sometimes stayed dim (XDA 4790286 #49/#50/#59).
+
+Why:
+- HWC does not report doze support (USES_DOZEMODE is not set), so "AoD"
+  is the panel in normal ON mode and the brightness is whatever
+  DisplayPowerController sets.
+- config_allowAutoBrightnessWhileDozing=true keeps the auto-brightness
+  controller and its light sensor armed through doze. In DOZE_SUSPEND the
+  AP sleeps and the non-wakeup light sensor delivers nothing. On wake,
+  the ring buffer still holds the old (usually dark or in-pocket) sample.
+  The controller only brightens once both the 2 s and 10 s
+  weighted averages pass the hysteresis threshold, and then only after
+  the 2 s brightening debounce. Each step then ramps at the panel's slow
+  displayconfig rates (up to 3 s each), which adds up to the ~10 s
+  reported.
+- config_screenBrightnessDoze=32 was dead config: DisplayDeviceConfig
+  prefers config_screenBrightnessDozeFloat, whose AOSP default is 0.0
+  (not the -2 "invalid" marker). So with manual brightness the AoD ran at
+  the panel minimum.
+
+Fix:
+- Disable auto-brightness while dozing. The light sensor is released in
+  doze; on wake it is re-registered with the ambient lux invalid, and
+  the first sample is used directly (no horizon, no debounce).
+- Set config_screenBrightnessDozeFloat (and the integer fallback) to
+  11/255 = 10/254 (0.0394, ~38 nits on the o1s brightness map). The
+  previous integer, 32/255 (~112 nits), is too bright for a panel held
+  in normal mode all night (burn-in, battery). SystemUI
+  (DozeScreenBrightness) caps the level at the screen brightness from
+  the moment the device went to sleep, and only then. It does not
+  track the room during AoD, so a phone put down in a lit room keeps
+  this level in the dark. That is why the level itself is kept low.
+- Enable config_skipScreenOnBrightnessRamp so the DOZE->ON transition,
+  and the first auto-brightness value after it, are applied without a
+  ramp.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../base/core/res/res/values/config.xml       | 23 ++++++++++++++++---
+ 1 file changed, 20 insertions(+), 3 deletions(-)
+
+diff --git a/overlay/frameworks/base/core/res/res/values/config.xml b/overlay/frameworks/base/core/res/res/values/config.xml
+index 48da821..594e7b7 100644
+--- a/overlay/frameworks/base/core/res/res/values/config.xml
++++ b/overlay/frameworks/base/core/res/res/values/config.xml
+@@ -110,8 +110,13 @@
+     -->
+     <bool name="config_powerDecoupleAutoSuspendModeFromDisplay">true</bool>
+ 
+-    <!-- Allow automatic adjusting of the screen brightness while dozing in low power state. -->
+-    <bool name="config_allowAutoBrightnessWhileDozing">true</bool>
++    <!-- Allow automatic adjusting of the screen brightness while dozing in low power state.
++         Keep this off: the AP suspends in DOZE_SUSPEND, so the light sensor's samples stop
++         arriving while the auto-brightness controller stays armed. On wake it keeps averaging
++         the stale (usually dark) lux over its 10 s long horizon and takes seconds to raise the
++         brightness. With this off the sensor is re-armed on wake and its first sample is used
++         immediately. -->
++    <bool name="config_allowAutoBrightnessWhileDozing">false</bool>
+ 
+     <!-- Power Management: Specifies whether to decouple the interactive state of the
+          device from the display on/off state.
+@@ -160,7 +165,19 @@
+     <!-- Screen brightness used to dim the screen while dozing in a very low power state.
+          May be less than the minimum allowed brightness setting
+          that can be set by the user. -->
+-    <integer name="config_screenBrightnessDoze">32</integer>
++    <integer name="config_screenBrightnessDoze">11</integer>
++    <!-- The framework reads the float first and only falls back to the integer above when the
++         float is -2 (invalid). The AOSP default float is 0.0, which silently turned the AoD down
++         to the panel minimum. Use the same level as the integer above (11/255 = 10/254, ~38 nits
++         on this panel's map): AoD runs the panel in normal (not LPM) mode all night, so keep it
++         low for burn-in and battery. SystemUI only caps it at the brightness the screen had
++         when it went to sleep; it does not follow the room afterwards. -->
++    <item name="config_screenBrightnessDozeFloat" format="float" type="dimen">0.03937008</item>
++
++    <!-- Skip the brightness ramp when the display leaves AoD/doze for STATE_ON (and for the first
++         auto-brightness adjustment after that). Otherwise the brightness climbs from AoD level at the
++         panel's slow ramp rates. -->
++    <bool name="config_skipScreenOnBrightnessRamp">true</bool>
+ 
+     <!-- Stability requirements in milliseconds for accepting a new brightness level.  This is used
+          for debouncing the light sensor.  Different constants are used to debounce the light sensor
+-- 
+2.55.0
+

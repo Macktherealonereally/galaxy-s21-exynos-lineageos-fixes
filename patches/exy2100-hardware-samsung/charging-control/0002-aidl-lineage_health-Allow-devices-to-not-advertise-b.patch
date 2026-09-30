@@ -1,0 +1,56 @@
+From f0b5d4422e5cecc388b6d1e88260eca99d7006e4 Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Wed, 30 Sep 2026 12:56:00 +0200
+Subject: [PATCH 2/3] aidl: lineage_health: Allow devices to not advertise
+ bypass charging
+
+Writing 0 to charging_enabled doesn't always keep the device on charger
+power: depending on the battery driver and its device tree, sec_battery
+turns the buck off and the device runs from the battery (reported as
+discharging). Advertising BYPASS then makes Lineage health resume
+charging 1% below the limit and skip its battery level monitoring.
+
+Add samsungHealthVars.charging_control_supports_bypass, like the default
+HAL's lineage_health one; it defaults to true.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ aidl/lineage_health/Android.bp          | 4 ++++
+ aidl/lineage_health/ChargingControl.cpp | 6 ++++--
+ 2 files changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/aidl/lineage_health/Android.bp b/aidl/lineage_health/Android.bp
+index 2b119d2..a9cda7e 100644
+--- a/aidl/lineage_health/Android.bp
++++ b/aidl/lineage_health/Android.bp
+@@ -9,6 +9,10 @@ cc_binary {
+     relative_install_path: "hw",
+     init_rc: ["vendor.lineage.health-service.samsung.rc"],
+     vintf_fragments: ["vendor.lineage.health-service.samsung.xml"],
++    cflags: select(soong_config_variable("samsungHealthVars", "charging_control_supports_bypass"), {
++        false: [],
++        default: ["-DHEALTH_CHARGING_CONTROL_SUPPORTS_BYPASS"],
++    }),
+     srcs: [
+         "service.cpp",
+         "ChargingControl.cpp",
+diff --git a/aidl/lineage_health/ChargingControl.cpp b/aidl/lineage_health/ChargingControl.cpp
+index 7775246..afb012c 100644
+--- a/aidl/lineage_health/ChargingControl.cpp
++++ b/aidl/lineage_health/ChargingControl.cpp
+@@ -67,8 +67,10 @@ ndk::ScopedAStatus ChargingControl::getSupportedMode(int* _aidl_return) {
+     if (access(CHARGING_ENABLED_NODE, O_RDWR)) {
+         LOG(ERROR) << "Can't access " << CHARGING_ENABLED_NODE << ": " << strerror(errno);
+     } else {
+-        *_aidl_return = static_cast<int>(ChargingControlSupportedMode::TOGGLE) |
+-                        static_cast<int>(ChargingControlSupportedMode::BYPASS);
++        *_aidl_return = static_cast<int>(ChargingControlSupportedMode::TOGGLE);
++#ifdef HEALTH_CHARGING_CONTROL_SUPPORTS_BYPASS
++        *_aidl_return |= static_cast<int>(ChargingControlSupportedMode::BYPASS);
++#endif
+     }
+     return ndk::ScopedAStatus::ok();
+ }
+-- 
+2.55.0
+

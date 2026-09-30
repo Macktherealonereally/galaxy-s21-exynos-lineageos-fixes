@@ -1,0 +1,38 @@
+From 72d79db8c8205064218551db3877560ab34b940b Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Wed, 30 Sep 2026 12:56:00 +0200
+Subject: [PATCH 1/2] exynos2100: Don't advertise bypass charging
+
+sec_battery turns the buck off when charging_enabled is 0 and the
+battery is above store_mode_charging_max, or always with
+battery,store_mode_buckoff (set on o1s). So at the charging limit the
+device runs from the battery instead of the charger, and Lineage health
+must treat it as a plain toggle: recharge after the configured margin
+instead of cycling 1% below the limit.
+
+Requires "aidl: lineage_health: Allow devices to not advertise bypass
+charging" in hardware/samsung.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ common.mk | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/common.mk b/common.mk
+index a19612e..0fb93dc 100644
+--- a/common.mk
++++ b/common.mk
+@@ -197,6 +197,10 @@ PRODUCT_PACKAGES += \
+ PRODUCT_PACKAGES += \
+     vendor.lineage.health-service.samsung
+ 
++# sec_battery turns the buck off when charging is disabled above store_mode_charging_max
++# (or always with battery,store_mode_buckoff), so the device runs from the battery.
++$(call soong_config_set_bool,samsungHealthVars,charging_control_supports_bypass,false)
++
+ # Keymaster
+ PRODUCT_PACKAGES += \
+     android.hardware.keymaster@4.0-service.samsung \
+-- 
+2.55.0
+

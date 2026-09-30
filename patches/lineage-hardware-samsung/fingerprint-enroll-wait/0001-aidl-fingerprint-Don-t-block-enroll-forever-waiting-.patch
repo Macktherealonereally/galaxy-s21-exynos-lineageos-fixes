@@ -1,0 +1,106 @@
+From fe8e461a43ef52a4c5a56b9bc46a7acc5bdd7785 Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Wed, 30 Sep 2026 11:07:09 +0200
+Subject: [PATCH] aidl: fingerprint: Don't block enroll() forever waiting for
+ calibration
+
+With ro.vendor.fingerprint.force_calibrate=true (set by several Samsung
+devices, e.g. beyond*, d1/d2*, dm1q, a71, o1s), enroll() spins until
+SEM_FINGERPRINT_EVENT_CAPTURE_READY arrives. If the event never comes -
+ss_fingerprint_enroll() already failed, or the TA/sensor is still
+initialising right after first boot - the binder call never returns,
+FingerprintService's scheduler is stuck and the enrollment UI (e.g. in
+the Setup Wizard) only shows a generic error.
+
+Skip the wait when enroll failed, bound it to 3 s otherwise, and make
+mCaptureReady atomic since it is written from the HAL callback thread.
+Log how long the wait took (measured from the calibration request) and
+whether it timed out, so the timeout can be sized from real data.
+
+Change-Id: I8ba9c44accaa359e717e99d5d9c05eb911113579
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ aidl/fingerprint/Session.cpp | 27 ++++++++++++++++++++++++---
+ aidl/fingerprint/Session.h   |  4 +++-
+ 2 files changed, 27 insertions(+), 4 deletions(-)
+
+diff --git a/aidl/fingerprint/Session.cpp b/aidl/fingerprint/Session.cpp
+index 9b17f41..5815e65 100644
+--- a/aidl/fingerprint/Session.cpp
++++ b/aidl/fingerprint/Session.cpp
+@@ -20,6 +20,10 @@
+ using namespace ::android::fingerprint::samsung;
+ using namespace ::std::chrono_literals;
+ 
++namespace {
++constexpr auto kCaptureReadyTimeout = 3s;
++}  // namespace
++
+ namespace aidl {
+ namespace android {
+ namespace hardware {
+@@ -66,6 +70,7 @@ ndk::ScopedAStatus Session::enroll(const HardwareAuthToken& hat,
+                                    std::shared_ptr<ICancellationSignal>* out) {
+     LOG(INFO) << "enroll";
+ 
++    const auto calibrateStart = std::chrono::steady_clock::now();
+     if (FingerprintHalProperties::force_calibrate().value_or(false)) {
+         mCaptureReady = false;
+         mHal.request(SEM_REQUEST_FORCE_CBGE, 1);
+@@ -78,12 +83,28 @@ ndk::ScopedAStatus Session::enroll(const HardwareAuthToken& hat,
+     if (error) {
+         LOG(ERROR) << "ss_fingerprint_enroll failed: " << error;
+         mCb->onError(Error::UNABLE_TO_PROCESS, error);
+-    }
+-
+-    if (FingerprintHalProperties::force_calibrate().value_or(false)) {
++    } else if (FingerprintHalProperties::force_calibrate().value_or(false)) {
++        // Wait for the calibration to finish, but never block the binder
++        // thread forever: if CAPTURE_READY never arrives (sensor/TA still
++        // initialising on first boot, event routed to another session) the
++        // framework's biometric scheduler hangs on this call and the
++        // enrollment UI ends up with a generic "Something went wrong".
++        const auto deadline = std::chrono::steady_clock::now() + kCaptureReadyTimeout;
++        bool timedOut = false;
+         while (!mCaptureReady) {
++            if (std::chrono::steady_clock::now() >= deadline) {
++                timedOut = true;
++                break;
++            }
+             std::this_thread::sleep_for(100ms);
+         }
++        // Log the real calibration time (from the CBGE request) so the
++        // timeout can be sized from field data.
++        const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
++                                       std::chrono::steady_clock::now() - calibrateStart)
++                                       .count();
++        LOG(INFO) << "Capture ready wait: " << elapsedMs << " ms since calibration request"
++                  << (timedOut ? " (timed out, continuing)" : "");
+     }
+ 
+     *out = SharedRefBase::make<CancellationSignal>(this);
+diff --git a/aidl/fingerprint/Session.h b/aidl/fingerprint/Session.h
+index 8ef41b1..e704135 100644
+--- a/aidl/fingerprint/Session.h
++++ b/aidl/fingerprint/Session.h
+@@ -6,6 +6,8 @@
+ 
+ #pragma once
+ 
++#include <atomic>
++
+ #include <aidl/android/hardware/biometrics/fingerprint/BnSession.h>
+ #include <aidl/android/hardware/biometrics/fingerprint/ISessionCallback.h>
+ 
+@@ -74,7 +76,7 @@ class Session : public BnSession {
+     LegacyHAL mHal;
+     LockoutTracker mLockoutTracker;
+     bool mClosed = false;
+-    bool mCaptureReady = false;
++    std::atomic<bool> mCaptureReady = false;
+ 
+     Error VendorErrorFilter(int32_t error, int32_t* vendorCode);
+     AcquiredInfo VendorAcquiredFilter(int32_t info, int32_t* vendorCode);
+-- 
+2.55.0
+

@@ -1,10 +1,10 @@
-# Galaxy S21 Exynos (SM-G991B / o1s) on LineageOS 23.2: VoLTE, eSIM, NFC, Wi-Fi, WPA3 hotspot and 60 fps video fixes
+# Galaxy S21 Exynos (SM-G991B / o1s) on LineageOS 23.2: VoLTE, eSIM, NFC, Wi-Fi, WPA3 hotspot, 60 fps video, charge limit and AoD fixes
 
-*Unofficial LineageOS 23.2 (Android 16) for the Samsung Galaxy S21 5G Exynos 2100 (SM-G991B, codename `o1s`), built from the [exy2100](https://github.com/exy2100) trees. Last updated 2026-09-28.*
+*Unofficial LineageOS 23.2 (Android 16) for the Samsung Galaxy S21 5G Exynos 2100 (SM-G991B, codename `o1s`), built from the [exy2100](https://github.com/exy2100) trees. Last updated 2026-09-30.*
 
 This page collects the fixes we made on top of the exy2100 lineage-23.2 trees, and where they were submitted. It is written for S21 owners, ROM builders, and their AI agents who search for an error string. Each fix is listed as **symptom (the exact log line) → root cause → fix → how it was verified → where the patch is.**
 
-Short version: **VoLTE (with HD voice), SMS over IMS, eSIM (including carrier apps installing their eSIM), NFC, WPA3, the WPA3 hotspot, 60 fps video recording and the Wi-Fi country code all work on our builds.** None of it needs Samsung's proprietary IMS. Everything is open source and submitted upstream, with PR links below.
+Short version: **VoLTE (with HD voice), SMS over IMS, eSIM (including carrier apps installing their eSIM), NFC, WPA3, the WPA3 hotspot, 60 fps video recording, the Wi-Fi country code, the battery charge limit and quick brightness when waking from AoD all work on our builds.** None of it needs Samsung's proprietary IMS. Everything is open source and submitted upstream, with PR links below.
 
 > Target device: **SM-G991B** (S21 5G Exynos, `o1s`), on stock firmware base **G991BXXSJHZC2**. The common fixes (`universal2100-common`, kernel) likely also apply to the S21+ (`t2s`), the S21 Ultra (`p3s`) and the S21 FE Exynos (`r9s`), but we only tested o1s.
 
@@ -18,17 +18,18 @@ Short version: **VoLTE (with HD voice), SMS over IMS, eSIM (including carrier ap
 4. [NFC](#nfc)
 5. [Wi-Fi: WPA3, WPA3 hotspot and country code "99"](#wi-fi)
 6. [60 fps video recording](#60-fps-video-recording)
-7. [SELinux enforcing](#selinux-enforcing)
-8. [Smaller fixes](#smaller-fixes)
-9. [Known limitations](#known-limitations)
-10. [How to reproduce (build)](#how-to-reproduce)
-11. [Where the patches are](#where-the-patches-are)
+7. [Charge limit, AoD, fingerprint, recovery USB, USB-C audio (2026-09-30)](#charge-limit-aod-fingerprint-recovery-usb-usb-c-audio)
+8. [SELinux enforcing](#selinux-enforcing)
+9. [Smaller fixes](#smaller-fixes)
+10. [Known limitations](#known-limitations)
+11. [How to reproduce (build)](#how-to-reproduce)
+12. [Where the patches are](#where-the-patches-are)
 
 ---
 
 ## Status
 
-On our signed `userdebug` builds, SELinux **enforcing**, tested on one SM-G991B between 2026-09-25 and 2026-09-28:
+On our signed `userdebug` builds, SELinux **enforcing**, tested on one SM-G991B between 2026-09-25 and 2026-09-30:
 
 | Feature | Upstream exy2100 build (20260621) | With these fixes | Notes |
 |---|---|---|---|
@@ -51,10 +52,16 @@ On our signed `userdebug` builds, SELinux **enforcing**, tested on one SM-G991B 
 | **NFC** (tags) | ❌ never powers on | ✅ | kernel 32-bit ioctls |
 | NFC battery drain (`ABNORMAL_POWER(DPD)`) | ❌ wakeup every ~11 s | ✅ | eSE node permissions |
 | VoIP mic on speakerphone (WhatsApp etc.) | ❌ | ✅ | `txse4.bin` firmware |
-| Fingerprint | ✅ | ✅ | enroll from Settings. Enrolling inside Setup Wizard fails |
+| Fingerprint | ✅ | ✅ | enroll from Settings. Enrolling inside Setup Wizard fails ([defensive fix](#fingerprint-enrollment-hangs-in-setup-wizard), not yet verified) |
+| Fingerprint on the AoD | ⚠️ stops after ~4 s | ⏳ fix built, test pending | [screen-off UDFPS default](#fingerprint-stops-working-on-the-aod-after-a-few-seconds); workaround: toggle "Screen-off Fingerprint Unlock" off and on |
+| Charge limit (Battery → Charging control) | ❌ no effect, charges to 100% | ✅ Limit mode: stops at the limit, charger keeps powering the phone | [charge limit](#charge-limit-has-no-effect) |
+| Brightness when waking from AoD | ❌ dim for up to ~10 s | ✅ right level 18 ms after wake | [AoD undim](#screen-stays-dim-for-up-to-10-s-after-waking-from-aod) |
+| YouTube picture-in-picture | ⚠️ flicker reported on XDA | ✅ no flicker | [SBWC off](#video-flicker-in-picture-in-picture) (we never saw the flicker ourselves) |
+| Recovery `adb sideload` over USB | ❌ `error -71` until replug | ✅ first try | [recovery USB](#recovery-sideload-pc-doesnt-see-the-phone-error--71) |
 | Camera **60 fps video** (1080p, all cameras) | ❌ | ✅ | [camera provider + overlay](#60-fps-video-recording) |
 | Samsung Pay / Secure Folder / Samsung Pass | ❌ | ❌ | [Knox fuse](#knox-fuse) |
-| USB-C → 3.5 mm DAC | ⚠️ | ⚠️ | detected but silent (audio offload), not fixed here |
+| USB-C → 3.5 mm DAC / USB-C headset (output) | ⚠️ | ✅ | works via ABOX offload on two adapters; [USB-C audio](#usb-c-audio) |
+| USB-C headset **microphone** | ❓ | ❓ | not tested, [testers wanted](#usb-c-audio) |
 
 ---
 
@@ -365,6 +372,88 @@ It isn't the codecs or `media_profiles` (those are identical to stock). It is a 
 
 ---
 
+## Charge limit, AoD, fingerprint, recovery USB, USB-C audio
+
+A bug sweep on 2026-09-30, verified on build "Hare 11 / 11.1" unless marked pending.
+
+### Charge limit has no effect
+
+**Symptom:** Settings → Battery → Charging control ("limit to 80%") does nothing; the phone charges to 100%. logcat from `vendor.lineage.health-service.samsung`: `Unknown value 1`.
+
+**Cause:**
+- sec_battery prints `/sys/class/power_supply/battery/charging_enabled` as `"1\n"`. The Samsung `lineage_health` HAL compared it with `"1"` without trimming, so `getChargingEnabled()` always failed, and lineage-sdk's Toggle provider gave up before switching charging off.
+- Even with that fixed, the S21 would run from the **battery** at the limit: sec_battery turns the buck off when charging is disabled above `store_mode_charging_max` (always on o1s, `battery,store_mode_buckoff`), while the HAL advertised "bypass".
+
+**Fix:**
+- trim the value: [PR-26];
+- let devices drop `BYPASS`, and add a real **LIMIT** mode using `batt_full_capacity` (the node One UI's "Protect battery" uses): charging stops at the limit, the buck stays on, so the charger powers the phone, and it recharges 2% below: [PR-33a] + [PR-33b];
+- lineage-sdk: with a HAL that offers LIMIT and Toggle, the Auto/Manual schedule modes picked Limit, which doesn't implement them, and system_server would crash when the charger is connected (Auto is the default). Found in the code, fixed before enabling LIMIT: [PR-34] (LineageOS Gerrit) / [PR-34b] (exy2100 fork). **If you build the LIMIT change, build this one too.**
+
+**Verified (Hare 11.1):** Limit mode 70%, plugged in: `dumpsys lineagehealth` shows the Limit provider; battery status `NOT_CHARGING` (not `DISCHARGING`) with the charger powering the phone; kernel `Status(Not-charging)`, `charging_enabled(1)`; no SELinux denials. Not yet observed: the stop at the limit when charging up from below (the test started at 100%).
+
+### Screen stays dim for up to 10 s after waking from AoD
+
+**Symptom** (XDA thread 4790286, posts #49/#50/#59): after waking from Always-on Display, the screen stays dim for up to ~10 s, sometimes longer.
+
+**Cause:** AoD on this device is the panel in normal mode with the brightness set by the framework. Auto-brightness stayed armed through doze, but in deep doze the light sensor delivers nothing, so on wake the controller still held the old dark reading and only brightened after its averages, debounce and slow ramps (up to 3 s each). The panel's "fast" ramp rate was also about 12× slower than AOSP's default.
+
+**Fix:** overlay `config_allowAutoBrightnessWhileDozing=false`, a fixed low AoD level (11/255, `config_screenBrightnessDozeFloat`), `config_skipScreenOnBrightnessRamp=true`: [PR-28]; AOSP default fast ramp rate in the o1s display config: [PR-29].
+
+**Verified (Hare 11.1):** woken in a lit room after the phone was in the dark: auto-brightness applied 313 nits (1355 lux) **18 ms** after the screen turned on, no ramp. Trade-off: AoD brightness is a fixed low level and no longer follows room light while dozing.
+
+### Fingerprint stops working on the AoD after a few seconds
+
+**Symptom:** with AoD on, the fingerprint sensor works for ~4 s and then stops responding until the screen is woken another way. "Screen-off Fingerprint Unlock" shows as **on** in Settings.
+
+**Cause:** exynos2100 sets `config_screen_off_udfps_default_on=true`, and Settings uses that as the default while the setting was never written. Samsung's `BiometricService` (exy2100 `hardware/samsung`, `packages/Biometrics`) read the same setting with a hard-coded default of off, so when AoD goes to DOZE_SUSPEND it disabled the FoD.
+
+**Fix:** use the same default in the service: [PR-32]. **Workaround** without the fix: toggle "Screen-off Fingerprint Unlock" off and on once.
+
+**Verified:** the bug on Hare 11.1; the fix is in the next build, **device test pending**.
+
+### Fingerprint enrollment hangs in Setup Wizard
+
+**Symptom:** enrolling a fingerprint inside Setup Wizard fails with a generic error; enrolling from Settings later works.
+
+**Likely cause:** with `ro.vendor.fingerprint.force_calibrate=true`, `Session::enroll()` waits for the sensor's CAPTURE_READY event with no timeout, even after `ss_fingerprint_enroll()` failed. The root cause of the failing enroll itself is not proven.
+
+**Fix (defensive):** skip the wait when enroll failed, otherwise wait at most 3 s, and log the wait time: [PR-27] (LineageOS Gerrit, affects every Samsung device with `force_calibrate`). **Device test pending.**
+
+### Video flicker in picture-in-picture
+
+**Symptom** (XDA post #137): YouTube video flickers and shows blocky frames when it shrinks into picture-in-picture.
+
+**Cause (from the source):** `vendor.debug.c2.sbwc.enable=true` makes the Exynos Codec2 decoders output Samsung-compressed (SBWC) frames. Only the display hardware can read those; when a video layer falls back to GPU composition (rounded corners, PiP animations), AOSP's SurfaceFlinger has no decompression step.
+
+**Fix:** `vendor.debug.c2.sbwc.enable=false`, like the Galaxy A55 tree: [PR-30].
+
+**Verified (Hare 11.1):** PiP including resizing and moving: no flicker. Caveat: we never reproduced the flicker before the change, so this shows nothing broke, not that it fixes the report. The extra battery use in 4K playback is not measured.
+
+### Recovery sideload: PC doesn't see the phone (`error -71`)
+
+**Symptom:** after "Apply from ADB" or `adb reboot sideload`, the PC often doesn't enumerate the phone until the cable is replugged. PC kernel log:
+```
+usb 1-2: can't set config #1, error -71
+usb 1-2: device not accepting address 9, error -71
+usb 1-2: device not accepting address 10, error -71
+```
+
+**Cause:** recovery's init enabled adb in `late-init` and recovery then switched the USB config again, unbinding and immediately rebinding the controller. The PC saw the device come back before it had handled the disconnect.
+
+**Fix:** drop the early `setprop sys.usb.config adb`, and wait 0.5 s after `sys.usb.config=none` before the next bind: [PR-25]. The new recovery reaches the phone only by flashing `recovery.img` or with Updater → Preferences → "Update recovery" on.
+
+**Verified (Hare 11):** old recovery: `can't set config #1, error -71` 40 ms after enumerating, then endless `not accepting address` until replug. New recovery: one clean enumeration and sideload on the first try, on two PC ports. Caveat: the port where the old recovery had failed got a USB controller reset just before its new-recovery run; a later install on that same port (hours later) also worked on the first try.
+
+### USB-C audio
+
+**Symptom** (XDA): some S21 kernels panic in `xhci_usb_parse_endpoint` when a USB-C audio adapter is plugged in, or play nothing.
+
+**Our result (Hare 11.1):** output **works** through Samsung's ABOX USB-audio offload with two different USB-C → 3.5 mm adapters, including repeated plug/unplug during playback: no panic, no reboot. Our kernel always allocates the structure the XDA panic dereferenced, so that crash can't happen here; we added NULL guards anyway ([PR-31], optional). One adapter reported the headset's mic line as a held play/pause button (which starts the assistant); that is the adapter/headset wiring, not the ROM.
+
+**Microphone: untested.** The ROM side looks right (`USB Headset In` is listed and capture opens through the offload path), but we had no USB-C headset with a working mic. **Testers wanted:** if you have a USB-C headset with a mic and an S21 / S21+ / S21 Ultra on an exy2100 LineageOS build, please report on XDA whether recording and calls use it.
+
+---
+
 ## SELinux enforcing
 
 Our builds run **enforcing**. The fixes needed are in [exy2100/android_device_samsung_universal2100-common#4](https://github.com/exy2100/android_device_samsung_universal2100-common/pull/4):
@@ -406,8 +495,11 @@ Not provided, because EVS is patent-encumbered. AMR-WB HD voice works.
 
 ### Other
 
-- Fingerprint enrolment fails inside Setup Wizard. Enrol from Settings afterwards.
-- USB-C DACs: reported on XDA as detected but silent (Samsung audio offload path). Not addressed here.
+- Fingerprint enrolment fails inside Setup Wizard. Enrol from Settings afterwards. A [defensive fix](#fingerprint-enrollment-hangs-in-setup-wizard) is in our builds but not verified yet.
+- Fingerprint on the AoD stops after ~4 s until the [fix](#fingerprint-stops-working-on-the-aod-after-a-few-seconds) is in your build. Workaround: toggle "Screen-off Fingerprint Unlock" off and on once.
+- USB-C headset microphones are **untested** (our only headset's mic line reads as a held button on the Samsung adapter, which is an accessory wiring issue). Output works. If you have a USB-C headset with a mic, please test and report on XDA.
+- AoD brightness is a fixed low level (it no longer follows room light while dozing), see [AoD undim](#screen-stays-dim-for-up-to-10-s-after-waking-from-aod).
+- Charge limit: with the phone already above the limit it stays there while plugged in; it doesn't discharge down to the limit (same as One UI's "Protect battery"). The Auto/Manual schedule modes use the older toggle method and were not tested on the device yet.
 - After a reboot with both SIMs in use, SIM 1 once stayed out of service until an airplane-mode toggle.
 - After enabling a new eSIM profile with OpenEUICC's "Send refresh command to modem" turned off, you need a reboot before the new line appears. Keep it on (see [eSIM tips](#how-to-switch-sim-2-between-tray-and-esim)).
 - `dumpsys secure_element` still shows `eSE1 mIsConnected:false`. This has no user-visible effect, and the eSE power issue itself is fixed.
@@ -441,7 +533,7 @@ This is a high-level outline. The exy2100 o1s README (PR #1) has the exact steps
    ```
    krazey force-pushes, so pin commits. openeuicc-deps HEAD needs SDK 37, which lineage-23.2 doesn't have.
 4. **Apply the patches** from the PRs listed below that aren't merged yet (fetch the PR branches or `git am` them).
-   `external/wpa_supplicant_8` and `hardware/samsung` are not device repos: a `repo sync` drops local commits there. Until the Gerrit changes are merged, keep them on a fork with a `remove-project` in your local manifest, or re-apply the patch after each sync.
+   `external/wpa_supplicant_8`, `hardware/samsung` and `lineage-sdk` are not device repos: a `repo sync` drops local commits there. Until the Gerrit changes are merged, keep them on a fork with a `remove-project` in your local manifest, or re-apply the patch after each sync.
 5. **Build:**
    ```sh
    source build/envsetup.sh && breakfast o1s && m bacon
@@ -459,7 +551,12 @@ This is a high-level outline. The exy2100 o1s README (PR #1) has the exact steps
 
 Placeholders like [LineageOS Gerrit 505300](https://review.lineageos.org/c/LineageOS/android_hardware_samsung/+/505300) are replaced by links once each PR or Gerrit change is opened. Until then, the patches for the newest fixes are in this repo:
 - 60 fps: `patches/lineage-hardware-samsung/` (applies to both LineageOS and exy2100 `hardware/samsung`), `patches/universal2100-common/camera-high-fps-video/`, `patches/o1s/`;
-- WPA3 hotspot: `patches/lineage-wpa-supplicant-8/`, `patches/universal2100-common/wpa3-softap/`.
+- WPA3 hotspot: `patches/lineage-wpa-supplicant-8/`, `patches/universal2100-common/wpa3-softap/`;
+- charge limit: `patches/exy2100-hardware-samsung/charging-control/` (3 patches, for the exy2100 `hardware/samsung` fork), `patches/universal2100-common/charging-limit-mode/`, `patches/lineage-sdk/` (**apply this one too**, see [charge limit](#charge-limit-has-no-effect));
+- fingerprint on the AoD: `patches/exy2100-hardware-samsung/screen-off-udfps-default/`;
+- AoD brightness: `patches/universal2100-common/aod-undim/`, `patches/o1s/0001-o1s-display-Use-AOSP-default-fast-brightness-ramp-ra.patch`;
+- PiP flicker: `patches/universal2100-common/codec2-no-sbwc/`; recovery USB: `patches/universal2100-common/recovery-usb-settle/`;
+- fingerprint enroll wait: `patches/lineage-hardware-samsung/fingerprint-enroll-wait/` (LineageOS and exy2100 `hardware/samsung`); USB audio guards: `patches/kernel/xhci-hwinfo-null-guards/`.
 
 | Ref | Repo | Topic | Status |
 |---|---|---|---|
@@ -490,6 +587,18 @@ Placeholders like [LineageOS Gerrit 505300](https://review.lineageos.org/c/Linea
 | [exy2100/android_device_samsung_o1s#5](https://github.com/exy2100/android_device_samsung_o1s/pull/5) | exy2100 o1s | Aperture: 60 fps at 1080p only | prepared |
 | [LineageOS Gerrit 505299](https://review.lineageos.org/c/LineageOS/android_external_wpa_supplicant_8/+/505299) | LineageOS external/wpa_supplicant_8 (Gerrit) | hostapd: bcmdhd in-dongle SAE SoftAP (WPA3 hotspot) | prepared |
 | [exy2100/android_device_samsung_universal2100-common#8](https://github.com/exy2100/android_device_samsung_universal2100-common/pull/8) | exy2100 universal2100-common | WifiOverlay: WPA3-SAE SoftAP (needs Gerrit 505299) | open (draft) |
+| [PR-25] | exy2100 universal2100-common | recovery: USB settle before rebinding (sideload `-71`) | prepared |
+| [PR-26] | exy2100 hardware/samsung | lineage_health: trim `charging_enabled` (charge limit had no effect) | prepared |
+| [PR-33a] | exy2100 hardware/samsung | lineage_health: opt out of BYPASS, charging LIMIT mode | prepared (after PR-26) |
+| [PR-33b] | exy2100 universal2100-common | use the LIMIT mode, no BYPASS | prepared (after PR-34/34b) |
+| [PR-34] | LineageOS lineage-sdk (Gerrit) | health: don't use Limit for the schedule modes if Toggle is supported (system_server crash) | prepared |
+| [PR-34b] | exy2100 lineage-sdk | same as PR-34, for the fork the o1s builds | prepared |
+| [PR-28] | exy2100 universal2100-common | overlay: restore brightness at once when waking from AoD | prepared |
+| [PR-29] | exy2100 o1s | display: AOSP default fast brightness ramp | prepared |
+| [PR-32] | exy2100 hardware/samsung | biometrics: use the device default for screen-off UDFPS | prepared (device test pending) |
+| [PR-30] | exy2100 universal2100-common | Codec2 decoders: no SBWC output (PiP flicker) | prepared |
+| [PR-31] | exy2100 kernel | xhci: NULL-guard `g_hwinfo` (USB audio, defensive) | prepared |
+| [PR-27] | LineageOS hardware/samsung (Gerrit) + exy2100 | fingerprint: don't block `enroll()` forever | on hold (device test pending) |
 
 **Credits:**
 - ata-kaner and the exy2100 contributors, for the lineage-23.2 trees.

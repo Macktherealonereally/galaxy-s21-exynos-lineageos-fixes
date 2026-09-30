@@ -1,0 +1,67 @@
+From cf674231d0d8c9e64e65231394801782cf04b9d0 Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Wed, 30 Sep 2026 09:13:14 +0200
+Subject: [PATCH] usb: xhci: NULL-guard g_hwinfo in the Exynos USB audio
+ helpers
+
+xhci_usb_parse_endpoint(), xhci_store_hw_info() and xhci_set_deq()
+dereference the global g_hwinfo unconditionally. On this kernel
+g_hwinfo is always devm-allocated in xhci_run() (CONFIG_SND_EXYNOS_USB_AUDIO),
+so the NULL dereference that hits Floppy2100 in AOSP mode
+(xhci_endpoint_init -> xhci_usb_parse_endpoint, fixed there in
+963664a04f36) cannot currently trigger here. Add the same NULL guards
+anyway so that any future change that stops allocating g_hwinfo (e.g.
+disabling USB audio offload) or an allocation failure cannot turn
+plugging a USB-C audio adapter into a kernel panic.
+
+No functional change while g_hwinfo is allocated.
+
+Based on Flopster101/Floppy2100 963664a04f36 (guard part only).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/usb/host/xhci.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/usb/host/xhci.c b/drivers/usb/host/xhci.c
+index c12aa6587..d4baeca17 100644
+--- a/drivers/usb/host/xhci.c
++++ b/drivers/usb/host/xhci.c
+@@ -4126,8 +4126,13 @@ int xhci_store_hw_info(struct usb_hcd *hcd, struct usb_device *udev)
+ {
+ 	struct xhci_hcd *xhci = hcd_to_xhci(hcd);
+ 	struct xhci_virt_device *virt_dev;
+-	struct xhci_erst_entry *entry = &xhci->erst_audio.entries[0];
++	struct xhci_erst_entry *entry;
+ 
++	/* g_hwinfo is allocated in xhci_run(); never touch it before that. */
++	if (!g_hwinfo)
++		return 0;
++
++	entry = &xhci->erst_audio.entries[0];
+ 	virt_dev = xhci->devs[udev->slot_id];
+ 
+ 	g_hwinfo->dcbaa_dma = xhci->dcbaa->dma;
+@@ -4167,6 +4172,9 @@ int xhci_set_deq(struct xhci_hcd *xhci, struct xhci_container_ctx *ctx,
+ 	 * there are no audio devices occupied
+ 	 */
+ 
++	if (!g_hwinfo)
++		return 0;
++
+ 	if (last_ep < 31)
+ 		last_ep_ctx = last_ep + 1;
+ 	for (i = 0; i < last_ep_ctx; ++i) {
+@@ -5562,6 +5570,9 @@ void xhci_usb_parse_endpoint(struct usb_device *udev, struct usb_endpoint_descri
+ {
+ 	struct usb_endpoint_descriptor *d = desc;
+ 
++	if (!g_hwinfo)
++		return;
++
+ 	g_hwinfo->rawdesc_length = size;
+ 
+ 	if (( d->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK ) ==
+-- 
+2.55.0
+

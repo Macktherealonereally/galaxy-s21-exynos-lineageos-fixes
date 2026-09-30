@@ -1,0 +1,59 @@
+From 82b2dfe37c2b827e895c0675119a56134bb196dc Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Wed, 30 Sep 2026 13:05:06 +0200
+Subject: [PATCH 2/2] exynos2100: Support the charging limit mode
+
+Let Lineage health set the charging limit through batt_full_capacity,
+which keeps the device on charger power at the limit.
+
+Requires "aidl: lineage_health: Support the charging limit mode" in
+hardware/samsung and "health: Don't use Limit for the time based modes
+if Toggle is supported" in lineage-sdk.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ common.mk                      | 2 ++
+ init/init.samsung.rc           | 1 +
+ sepolicy/vendor/genfs_contexts | 1 +
+ 3 files changed, 4 insertions(+)
+
+diff --git a/common.mk b/common.mk
+index 0fb93dc..11b284a 100644
+--- a/common.mk
++++ b/common.mk
+@@ -200,6 +200,8 @@ PRODUCT_PACKAGES += \
+ # sec_battery turns the buck off when charging is disabled above store_mode_charging_max
+ # (or always with battery,store_mode_buckoff), so the device runs from the battery.
+ $(call soong_config_set_bool,samsungHealthVars,charging_control_supports_bypass,false)
++# batt_full_capacity keeps the device on charger power at the limit
++$(call soong_config_set_bool,samsungHealthVars,charging_control_supports_limit,true)
+ 
+ # Keymaster
+ PRODUCT_PACKAGES += \
+diff --git a/init/init.samsung.rc b/init/init.samsung.rc
+index baf5c1b..c5e34bb 100644
+--- a/init/init.samsung.rc
++++ b/init/init.samsung.rc
+@@ -347,6 +347,7 @@ on boot
+     chmod 0664 /efs/Battery/fg_full_voltage
+     chmod 0664 /sys/class/power_supply/battery/fg_full_voltage
+     chown system radio /sys/class/power_supply/battery/charging_enabled
++    chown system radio /sys/class/power_supply/battery/batt_full_capacity
+     chown system radio /sys/class/power_supply/battery/batt_reset_soc
+     chown system radio /sys/class/power_supply/battery/batt_slate_mode
+     chown system radio /sys/class/power_supply/battery/factory_mode
+diff --git a/sepolicy/vendor/genfs_contexts b/sepolicy/vendor/genfs_contexts
+index 8aa539c..9079c57 100644
+--- a/sepolicy/vendor/genfs_contexts
++++ b/sepolicy/vendor/genfs_contexts
+@@ -34,6 +34,7 @@ genfscon sysfs /devices/platform/samsung_mobile_device/samsung_mobile_device:bat
+ genfscon sysfs /devices/platform/samsung_mobile_device/samsung_mobile_device:battery/power_supply/usb/type                            u:object_r:sysfs_battery:s0
+ genfscon sysfs /devices/platform/samsung_mobile_device/samsung_mobile_device:battery/power_supply/wireless/type                       u:object_r:sysfs_battery:s0
+ genfscon sysfs /devices/platform/samsung_mobile_device/samsung_mobile_device:sec-direct-charger/power_supply/sec-direct-charger/type  u:object_r:sysfs_battery:s0
++genfscon sysfs /devices/platform/samsung_mobile_device/samsung_mobile_device:battery/power_supply/battery/batt_full_capacity          u:object_r:sysfs_battery_writable:s0
+ genfscon sysfs /devices/platform/samsung_mobile_device/samsung_mobile_device:battery/power_supply/battery/wc_tx_en                    u:object_r:sysfs_battery_writable:s0
+ genfscon sysfs /devices/platform/samsung_mobile_device/samsung_mobile_device:battery/power_supply/battery/wc_tx_stop_capacity         u:object_r:sysfs_battery_writable:s0
+ 
+-- 
+2.55.0
+
