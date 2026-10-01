@@ -417,7 +417,7 @@ A bug sweep on 2026-09-30, verified on build "Hare 11 / 11.1" unless marked pend
 
 **Likely cause:** with `ro.vendor.fingerprint.force_calibrate=true`, `Session::enroll()` waits for the sensor's CAPTURE_READY event with no timeout, even after `ss_fingerprint_enroll()` failed. The root cause of the failing enroll itself is not proven.
 
-**Fix (defensive):** skip the wait when enroll failed, otherwise wait at most 3 s, and log the wait time: (PR on hold, LineageOS Gerrit, affects every Samsung device with `force_calibrate`). **Device test pending.**
+**Fix (defensive):** skip the wait when enroll failed, otherwise wait at most 3 s, and log the wait time: (https://github.com/exy2100/android_hardware_samsung/pull/5, LineageOS Gerrit 505789/505790, affects every Samsung device with `force_calibrate`). **Device test pending.**
 
 ### Video flicker in picture-in-picture
 
@@ -598,7 +598,7 @@ Placeholders like [LineageOS Gerrit 505300](https://review.lineageos.org/c/Linea
 | [exy2100/android_hardware_samsung#2](https://github.com/exy2100/android_hardware_samsung/pull/2) | exy2100 hardware/samsung | biometrics: use the device default for screen-off UDFPS | prepared (device test pending) |
 | [exy2100/android_device_samsung_universal2100-common#12](https://github.com/exy2100/android_device_samsung_universal2100-common/pull/12) | exy2100 universal2100-common | Codec2 decoders: no SBWC output (PiP flicker) | prepared |
 | [exy2100/android_kernel_samsung_universal2100#12](https://github.com/exy2100/android_kernel_samsung_universal2100/pull/12) | exy2100 kernel | xhci: NULL-guard `g_hwinfo` (USB audio, defensive) | prepared |
-| PR 27 (on hold) | LineageOS hardware/samsung (Gerrit) + exy2100 | fingerprint: don't block `enroll()` forever | on hold (device test pending) |
+| [hardware_samsung#5](https://github.com/exy2100/android_hardware_samsung/pull/5) | LineageOS hardware/samsung (Gerrit) + exy2100 | fingerprint: don't block `enroll()` forever | open (tested: retry fixes first-attempt enroll) |
 
 **Credits:**
 - ata-kaner and the exy2100 contributors, for the lineage-23.2 trees.
