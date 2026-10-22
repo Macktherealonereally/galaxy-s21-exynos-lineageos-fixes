@@ -1,0 +1,81 @@
+From be51ca68899ef9ec5ba3b43c1c0b307f86ac92e0 Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Tue, 20 Oct 2026 20:03:13 +0200
+Subject: [PATCH] permission: Let updated system apps use explicit privapp
+ allowlist grants
+
+An updated system app only gets a privileged permission when its factory
+APK on the system image requested it. Google Play services updated from
+the store (26.40.x) requests privileged permissions such as
+GET_ROLE_HOLDERS that the factory GmsCore (25.15.x) shipped by
+MindTheGapps does not. Without it, adding a Google account crashes
+com.google.android.gms.ui (getRoleHoldersAsUser SecurityException).
+
+Also grant a privileged (not OEM-only) permission to an updated system
+app when the privapp-permissions allowlist of the factory package's
+partition explicitly grants it for that package. The rest is unchanged:
+an absent or <deny-permission> entry still means no grant, signature
+checks for updates still apply, OEM permissions keep the old rule, and
+the boot-time allowlist enforcement for factory packages is not
+touched. Permissions are re-evaluated for every package at boot and on
+every install, so no extra trigger is needed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Change-Id: I55a46f7ea60d7d83984448fe8733842b62d2a066
+---
+ .../permission/AppIdPermissionPolicy.kt       | 28 +++++++++++++++++--
+ 1 file changed, 26 insertions(+), 2 deletions(-)
+
+diff --git a/services/permission/java/com/android/server/permission/access/permission/AppIdPermissionPolicy.kt b/services/permission/java/com/android/server/permission/access/permission/AppIdPermissionPolicy.kt
+index e61cb9d7a..ebd67dd25 100644
+--- a/services/permission/java/com/android/server/permission/access/permission/AppIdPermissionPolicy.kt
++++ b/services/permission/java/com/android/server/permission/access/permission/AppIdPermissionPolicy.kt
+@@ -1671,12 +1671,18 @@ class AppIdPermissionPolicy : SchemePolicy() {
+             val shouldGrant =
+                 if (packageState.isUpdatedSystemApp) {
+                     // For updated system applications, a privileged/oem permission
+-                    // is granted only if it had been defined by the original application.
++                    // is granted only if it had been defined by the original application,
++                    // or if it is a privileged permission that the original application's
++                    // privapp-permissions allowlist explicitly grants (see below).
+                     val disabledSystemPackageState =
+                         newState.externalState.disabledSystemPackageStates[packageState.packageName]
+                     val disabledSystemPackage = disabledSystemPackageState?.androidPackage
+                     disabledSystemPackage != null &&
+-                        permission.name in disabledSystemPackage.requestedPermissions &&
++                        (permission.name in disabledSystemPackage.requestedPermissions ||
++                            isPrivilegedPermissionExplicitlyAllowlisted(
++                                disabledSystemPackageState,
++                                permission,
++                            )) &&
+                         shouldGrantPrivilegedOrOemPermission(disabledSystemPackageState, permission)
+                 } else {
+                     shouldGrantPrivilegedOrOemPermission(packageState, permission)
+@@ -1773,6 +1779,24 @@ class AppIdPermissionPolicy : SchemePolicy() {
+         return false
+     }
+ 
++    /**
++     * Whether the privileged permission allowlist of a factory (system image) package explicitly
++     * grants a privileged permission, i.e. a `<privapp-permissions>` entry says `<permission>` for
++     * it (not `<deny-permission>`, and not merely absent).
++     *
++     * This lets an updated system app (e.g. Google Play services updated from the store) receive a
++     * privileged permission that its factory APK did not request yet, as long as the device
++     * explicitly allowlists it for that package on the factory package's partition. Without an
++     * explicit allowlist entry nothing changes, and OEM-only permissions are not affected.
++     */
++    private fun MutateStateScope.isPrivilegedPermissionExplicitlyAllowlisted(
++        disabledSystemPackageState: PackageState,
++        permission: Permission,
++    ): Boolean =
++        permission.isPrivileged &&
++            getPrivilegedPermissionAllowlistState(disabledSystemPackageState, permission.name) ==
++                true
++
+     private fun MutateStateScope.shouldGrantPrivilegedOrOemPermission(
+         packageState: PackageState,
+         permission: Permission,
+-- 
+2.56.0
+

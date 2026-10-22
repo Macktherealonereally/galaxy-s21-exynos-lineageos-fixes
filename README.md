@@ -557,6 +557,7 @@ Placeholders like [LineageOS Gerrit 505300](https://review.lineageos.org/c/Linea
 - AoD brightness: `patches/universal2100-common/aod-undim/`, `patches/o1s/0001-o1s-display-Use-AOSP-default-fast-brightness-ramp-ra.patch`;
 - PiP flicker: `patches/universal2100-common/codec2-no-sbwc/`; recovery USB: `patches/universal2100-common/recovery-usb-settle/`;
 - fingerprint enroll wait: `patches/lineage-hardware-samsung/fingerprint-enroll-wait/` (LineageOS and exy2100 `hardware/samsung`); USB audio guards: `patches/kernel/xhci-hwinfo-null-guards/`.
+- Google account crash on GApps builds after Play services updates itself (`SecurityException ... getRoleHoldersAsUser ... GET_ROLE_HOLDERS` in `com.google.android.gms.ui`): `patches/lineage-frameworks-base/privapp-updated-allowlist/` (on LineageOS `frameworks/base` `lineage-23.2` c8e9a4a21). An updated system app normally only gets the privileged permissions its factory APK requested; with this patch it also gets a privileged permission that the factory partition's privapp allowlist explicitly grants it. Pair it with o1s `configs/permissions/privapp-permissions-gms-extra.xml` (tag `lineage-23.2-20261020` on the o1s fork). **This is a deliberate deviation from AOSP, only for our MTG/AMTG (GApps) builds, and is not submitted upstream.**
 
 | Ref | Repo | Topic | Status |
 |---|---|---|---|
