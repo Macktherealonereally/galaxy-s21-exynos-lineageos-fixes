@@ -1,0 +1,78 @@
+From 113e91a70a004e75b9cbe432089472ffaf558056 Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Tue, 27 Oct 2026 07:07:48 +0100
+Subject: [PATCH] SystemUI: QS lock: keep tile animation, drop stale clicks,
+ add Data Saver
+
+Follow-up to "Optionally lock network and security tiles on the lock
+screen":
+- Pass the Expandable through the replayed click, so the Internet and
+  Bluetooth dialogs animate from the tile again after unlocking. The
+  dialog animator skips the animation itself if the view is detached.
+- Drop the replayed click if the tile was destroyed while the bouncer
+  was showing (for example on a user switch).
+- Add Data Saver ("saver") to config_qsLockNetworkAndSecurityTiles.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Change-Id: Ib063a4c78cc9ee510a433abeb6a1fa09ce57b5b1
+(cherry picked from commit d83bab3dbc03142559bd14966be484c619b39984)
+---
+ .../SystemUI/res/values/lineage_config.xml     |  1 +
+ .../systemui/qs/tileimpl/QSTileImpl.java       | 18 ++++++++++++------
+ 2 files changed, 13 insertions(+), 6 deletions(-)
+
+diff --git a/packages/SystemUI/res/values/lineage_config.xml b/packages/SystemUI/res/values/lineage_config.xml
+index f944cddbf..379ae5153 100644
+--- a/packages/SystemUI/res/values/lineage_config.xml
++++ b/packages/SystemUI/res/values/lineage_config.xml
+@@ -90,5 +90,6 @@
+         <item>hotspot</item>
+         <item>nfc</item>
+         <item>usb_tether</item>
++        <item>saver</item>
+     </string-array>
+ </resources>
+diff --git a/packages/SystemUI/src/com/android/systemui/qs/tileimpl/QSTileImpl.java b/packages/SystemUI/src/com/android/systemui/qs/tileimpl/QSTileImpl.java
+index 9b28f4c8f..34a93fc9b 100644
+--- a/packages/SystemUI/src/com/android/systemui/qs/tileimpl/QSTileImpl.java
++++ b/packages/SystemUI/src/com/android/systemui/qs/tileimpl/QSTileImpl.java
+@@ -576,11 +576,17 @@ public abstract class QSTileImpl<TState extends State> implements QSTile, Lifecy
+ 
+     /**
+      * Shows the bouncer and replays the click once the user has unlocked. arg2 = 1 skips the
+-     * lock check for the replayed click; nothing happens if the bouncer is cancelled.
++     * lock check for the replayed click; nothing happens if the bouncer is cancelled. The
++     * Expandable is kept so dialogs still animate from the tile (the dialog animator skips the
++     * animation by itself if the view is gone). A tile destroyed meanwhile (e.g. user switch
++     * while the bouncer was up) drops the click.
+      */
+-    private void postClickAfterUnlock(int what, int eventId) {
+-        mActivityStarter.postQSRunnableDismissingKeyguard(
+-                () -> mHandler.obtainMessage(what, eventId, 1, null).sendToTarget());
++    private void postClickAfterUnlock(int what, int eventId, @Nullable Object expandable) {
++        mActivityStarter.postQSRunnableDismissingKeyguard(() -> {
++            if (!isDestroyed()) {
++                mHandler.obtainMessage(what, eventId, 1, expandable).sendToTarget();
++            }
++        });
+     }
+ 
+     protected void checkIfRestrictionEnforcedByAdminOnly(State state, String userRestriction) {
+@@ -668,7 +674,7 @@ public abstract class QSTileImpl<TState extends State> implements QSTile, Lifecy
+                                 mEnforcedAdmin);
+                         mActivityStarter.postStartActivityDismissingKeyguard(intent, 0);
+                     } else if (msg.arg2 == 0 && requiresUnlockWhileLocked()) {
+-                        postClickAfterUnlock(CLICK, msg.arg1);
++                        postClickAfterUnlock(CLICK, msg.arg1, msg.obj);
+                     } else {
+                         mQSLogger.logHandleClick(mTileSpec, msg.arg1);
+                         handleClick((Expandable) msg.obj);
+@@ -676,7 +682,7 @@ public abstract class QSTileImpl<TState extends State> implements QSTile, Lifecy
+                 } else if (msg.what == SECONDARY_CLICK) {
+                     name = "handleSecondaryClick";
+                     if (msg.arg2 == 0 && requiresUnlockWhileLocked()) {
+-                        postClickAfterUnlock(SECONDARY_CLICK, msg.arg1);
++                        postClickAfterUnlock(SECONDARY_CLICK, msg.arg1, msg.obj);
+                     } else {
+                         mQSLogger.logHandleSecondaryClick(mTileSpec, msg.arg1);
+                         handleSecondaryClick((Expandable) msg.obj);

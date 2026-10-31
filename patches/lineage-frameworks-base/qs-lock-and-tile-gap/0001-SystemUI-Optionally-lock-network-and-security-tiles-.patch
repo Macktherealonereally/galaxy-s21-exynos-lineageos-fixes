@@ -1,0 +1,163 @@
+From 38b2f9022be2c2d0f2814cf2e82253de292bc684 Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Mon, 26 Oct 2026 19:52:56 +0100
+Subject: [PATCH] SystemUI: Optionally lock network and security tiles on the
+ lock screen
+
+AOSP lets anyone pick up a locked phone and turn Wi-Fi, mobile data,
+Bluetooth, airplane mode, hotspot, NFC or USB tethering on or off from
+Quick Settings on the secure lock screen (only Location and VPN ask
+for an unlock). One UI has "Lock network and security" for this.
+
+Add the same as an opt-in: when Settings.Secure
+qs_lock_network_and_security is 1 and the device is locked
+(KeyguardManager#isDeviceLocked, so Smart Lock "unlocked" still
+counts as unlocked), a click or secondary click on one of the tiles
+in config_qsLockNetworkAndSecurityTiles shows the bouncer instead,
+like LocationTile does, and is replayed once the user unlocked.
+Cancelling the bouncer does nothing. The tile dialogs (Internet,
+Bluetooth) are opened by those clicks, so they are covered too; long
+press already needs an unlock (it starts the Settings activity).
+
+Default 0 = unchanged AOSP behaviour. The toggle lives in Settings >
+Lock screen.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Change-Id: I91d5f41354f5c991cf081f2e838b7fb4934b0113
+(cherry picked from commit 5d7b04895e520f5cb3b8336b9e48b22f03a12c9b)
+---
+ .../SystemUI/res/values/lineage_config.xml    | 15 ++++++
+ .../systemui/qs/tileimpl/QSTileImpl.java      | 48 ++++++++++++++++++-
+ 2 files changed, 61 insertions(+), 2 deletions(-)
+
+diff --git a/packages/SystemUI/res/values/lineage_config.xml b/packages/SystemUI/res/values/lineage_config.xml
+index ccb178f5d..f944cddbf 100644
+--- a/packages/SystemUI/res/values/lineage_config.xml
++++ b/packages/SystemUI/res/values/lineage_config.xml
+@@ -76,4 +76,19 @@
+ 
+     <!-- Whether to play turbulence noise after clicking the play button -->
+     <bool name="config_turbulenceNoise">true</bool>
++
++    <!-- Quick Settings tiles (specs) that need an unlock first while the device is locked,
++         when Settings > Lock screen > "Lock network and security" is on
++         (Settings.Secure qs_lock_network_and_security, off by default).
++         Location (and VPN) already always require an unlock in AOSP. -->
++    <string-array name="config_qsLockNetworkAndSecurityTiles" translatable="false">
++        <item>internet</item>
++        <item>wifi</item>
++        <item>cell</item>
++        <item>bt</item>
++        <item>airplane</item>
++        <item>hotspot</item>
++        <item>nfc</item>
++        <item>usb_tether</item>
++    </string-array>
+ </resources>
+diff --git a/packages/SystemUI/src/com/android/systemui/qs/tileimpl/QSTileImpl.java b/packages/SystemUI/src/com/android/systemui/qs/tileimpl/QSTileImpl.java
+index 68d1f8c12..9b28f4c8f 100644
+--- a/packages/SystemUI/src/com/android/systemui/qs/tileimpl/QSTileImpl.java
++++ b/packages/SystemUI/src/com/android/systemui/qs/tileimpl/QSTileImpl.java
+@@ -32,6 +32,7 @@ import static com.android.settingslib.RestrictedLockUtils.EnforcedAdmin;
+ import android.annotation.CallSuper;
+ import android.annotation.NonNull;
+ import android.annotation.SuppressLint;
++import android.app.KeyguardManager;
+ import android.content.Context;
+ import android.content.Intent;
+ import android.graphics.drawable.Drawable;
+@@ -39,6 +40,7 @@ import android.metrics.LogMaker;
+ import android.os.Handler;
+ import android.os.Looper;
+ import android.os.Message;
++import android.provider.Settings;
+ import android.text.format.DateUtils;
+ import android.util.ArraySet;
+ import android.util.Log;
+@@ -54,6 +56,7 @@ import com.android.internal.jank.InteractionJankMonitor;
+ import com.android.internal.logging.InstanceId;
+ import com.android.internal.logging.MetricsLogger;
+ import com.android.internal.logging.UiEventLogger;
++import com.android.internal.util.ArrayUtils;
+ import com.android.settingslib.RestrictedLockUtils;
+ import com.android.settingslib.RestrictedLockUtilsInternal;
+ import com.android.settingslib.graph.SignalDrawable;
+@@ -70,6 +73,7 @@ import com.android.systemui.qs.QSHost;
+ import com.android.systemui.qs.QsEventLogger;
+ import com.android.systemui.qs.SideLabelTileLayout;
+ import com.android.systemui.qs.logging.QSLogger;
++import com.android.systemui.res.R;
+ 
+ import java.io.PrintWriter;
+ import java.util.Objects;
+@@ -121,6 +125,13 @@ public abstract class QSTileImpl<TState extends State> implements QSTile, Lifecy
+     private final InstanceId mInstanceId;
+     private boolean mAnnounceNextStateChange;
+ 
++    /**
++     * Settings.Secure key: when 1, the tiles listed in
++     * {@code config_qsLockNetworkAndSecurityTiles} can't be used while the device is locked
++     * (secure lock screen) without unlocking first. 0 (default) keeps the AOSP behaviour.
++     */
++    private static final String QS_LOCK_NETWORK_AND_SECURITY = "qs_lock_network_and_security";
++
+     private String mTileSpec;
+     @Nullable
+     @VisibleForTesting
+@@ -545,6 +556,33 @@ public abstract class QSTileImpl<TState extends State> implements QSTile, Lifecy
+         return mIsDestroyed.get();
+     }
+ 
++    /**
++     * Whether "Lock network and security tiles" is on, this tile is one of them and the device
++     * is locked (secure keyguard, not unlocked by a trust agent). Called on the background thread.
++     */
++    private boolean requiresUnlockWhileLocked() {
++        final int userId = mHost.getUserId();
++        if (mTileSpec == null || Settings.Secure.getIntForUser(mContext.getContentResolver(),
++                QS_LOCK_NETWORK_AND_SECURITY, 0, userId) == 0) {
++            return false;
++        }
++        if (!ArrayUtils.contains(mContext.getResources().getStringArray(
++                R.array.config_qsLockNetworkAndSecurityTiles), mTileSpec)) {
++            return false;
++        }
++        final KeyguardManager km = mContext.getSystemService(KeyguardManager.class);
++        return km != null && km.isDeviceLocked(userId);
++    }
++
++    /**
++     * Shows the bouncer and replays the click once the user has unlocked. arg2 = 1 skips the
++     * lock check for the replayed click; nothing happens if the bouncer is cancelled.
++     */
++    private void postClickAfterUnlock(int what, int eventId) {
++        mActivityStarter.postQSRunnableDismissingKeyguard(
++                () -> mHandler.obtainMessage(what, eventId, 1, null).sendToTarget());
++    }
++
+     protected void checkIfRestrictionEnforcedByAdminOnly(State state, String userRestriction) {
+         EnforcedAdmin admin = RestrictedLockUtilsInternal.checkIfRestrictionEnforced(mContext,
+                 userRestriction, mHost.getUserId());
+@@ -629,14 +667,20 @@ public abstract class QSTileImpl<TState extends State> implements QSTile, Lifecy
+                         Intent intent = RestrictedLockUtils.getShowAdminSupportDetailsIntent(
+                                 mEnforcedAdmin);
+                         mActivityStarter.postStartActivityDismissingKeyguard(intent, 0);
++                    } else if (msg.arg2 == 0 && requiresUnlockWhileLocked()) {
++                        postClickAfterUnlock(CLICK, msg.arg1);
+                     } else {
+                         mQSLogger.logHandleClick(mTileSpec, msg.arg1);
+                         handleClick((Expandable) msg.obj);
+                     }
+                 } else if (msg.what == SECONDARY_CLICK) {
+                     name = "handleSecondaryClick";
+-                    mQSLogger.logHandleSecondaryClick(mTileSpec, msg.arg1);
+-                    handleSecondaryClick((Expandable) msg.obj);
++                    if (msg.arg2 == 0 && requiresUnlockWhileLocked()) {
++                        postClickAfterUnlock(SECONDARY_CLICK, msg.arg1);
++                    } else {
++                        mQSLogger.logHandleSecondaryClick(mTileSpec, msg.arg1);
++                        handleSecondaryClick((Expandable) msg.obj);
++                    }
+                 } else if (msg.what == LONG_CLICK) {
+                     name = "handleLongClick";
+                     mQSLogger.logHandleLongClick(mTileSpec, msg.arg1);

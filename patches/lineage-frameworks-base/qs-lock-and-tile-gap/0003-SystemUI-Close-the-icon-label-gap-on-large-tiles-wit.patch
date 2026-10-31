@@ -1,0 +1,126 @@
+From fb0087ce3eab96c20bf222242a543260694be74c Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Fri, 30 Oct 2026 07:07:48 +0100
+Subject: [PATCH] SystemUI: Close the icon-label gap on large tiles without
+ icon background
+
+Large (2x1) tiles center their 28dp icon in a 56dp box so the icons line
+up across tiles. Dual target tiles (Bluetooth, Internet, DND...) fill
+that box with the icon background, but single action tiles (Auto-rotate,
+Flashlight...) draw nothing there, so the empty end of the box pushes
+the label far away from the bare glyph.
+
+For tiles without an icon background, leave the 14dp end inset of the
+box, (ToggleTargetSize - LargeTileIconSize) / 2, out of its measured
+width. The icon keeps its exact position and size and is not clipped;
+the label starts as far from the icon as it does from the background on
+dual target tiles and gains that width. Placement is start-relative, so
+RTL mirrors it. Edit mode scales the inset with the resize progress, so
+icon-only tiles are unchanged and resizing has no jump.
+
+Reported-by: SkellyTechs (XDA)
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Change-Id: I7d857ee1372f29097e85d7b6fdd67e431b5c0e4c
+---
+ .../ui/compose/infinitegrid/CommonTile.kt     | 34 ++++++++++++++++++-
+ .../ui/compose/infinitegrid/EditTile.kt       |  2 +-
+ 2 files changed, 34 insertions(+), 2 deletions(-)
+
+diff --git a/packages/SystemUI/src/com/android/systemui/qs/panels/ui/compose/infinitegrid/CommonTile.kt b/packages/SystemUI/src/com/android/systemui/qs/panels/ui/compose/infinitegrid/CommonTile.kt
+index 0ae396615..13faad312 100644
+--- a/packages/SystemUI/src/com/android/systemui/qs/panels/ui/compose/infinitegrid/CommonTile.kt
++++ b/packages/SystemUI/src/com/android/systemui/qs/panels/ui/compose/infinitegrid/CommonTile.kt
+@@ -73,6 +73,7 @@ import androidx.compose.ui.graphics.graphicsLayer
+ import androidx.compose.ui.graphics.painter.Painter
+ import androidx.compose.ui.layout.ContentScale
+ import androidx.compose.ui.layout.Layout
++import androidx.compose.ui.layout.layout
+ import androidx.compose.ui.platform.LocalContext
+ import androidx.compose.ui.res.stringResource
+ import androidx.compose.ui.semantics.Role
+@@ -95,6 +96,7 @@ import com.android.systemui.common.shared.model.Icon
+ import com.android.systemui.common.ui.compose.Icon
+ import com.android.systemui.common.ui.compose.load
+ import com.android.systemui.compose.modifiers.sysuiResTag
++import com.android.systemui.qs.panels.ui.compose.infinitegrid.CommonTileDefaults.LargeTileIconInset
+ import com.android.systemui.qs.panels.ui.compose.infinitegrid.CommonTileDefaults.SideIconHeight
+ import com.android.systemui.qs.panels.ui.compose.infinitegrid.CommonTileDefaults.SideIconWidth
+ import com.android.systemui.qs.panels.ui.compose.infinitegrid.CommonTileDefaults.TILE_INITIAL_DELAY_MILLIS
+@@ -103,11 +105,13 @@ import com.android.systemui.qs.panels.ui.compose.infinitegrid.CommonTileDefaults
+ import com.android.systemui.qs.panels.ui.compose.infinitegrid.CommonTileDefaults.TileEndPadding
+ import com.android.systemui.qs.panels.ui.compose.infinitegrid.CommonTileDefaults.TileLabelBlurWidth
+ import com.android.systemui.qs.panels.ui.compose.infinitegrid.CommonTileDefaults.TileStartPadding
++import com.android.systemui.qs.panels.ui.compose.infinitegrid.CommonTileDefaults.ToggleTargetSize
+ import com.android.systemui.qs.panels.ui.compose.infinitegrid.CommonTileDefaults.longPressLabelSettings
+ import com.android.systemui.qs.panels.ui.viewmodel.AccessibilityUiState
+ import com.android.systemui.qs.ui.compose.borderOnFocus
+ import com.android.systemui.res.R
+ import kotlin.math.abs
++import kotlin.math.roundToInt
+ import platform.test.motion.compose.values.MotionTestValueKey
+ import platform.test.motion.compose.values.motionTestValues
+ 
+@@ -144,7 +148,7 @@ fun LargeTileContent(
+         val focusBorderColor = MaterialTheme.colorScheme.secondary
+         Box(
+             modifier =
+-                Modifier.size(CommonTileDefaults.ToggleTargetSize).thenIf(isDualTarget) {
++                Modifier.largeTileIconBox(hasIconBackground = isDualTarget).thenIf(isDualTarget) {
+                     Modifier.borderOnFocus(color = focusBorderColor, iconShape.topEnd)
+                         .clip(iconShape)
+                         .verticalSquish(squishiness)
+@@ -382,6 +386,32 @@ fun Modifier.largeTilePadding(isDualTarget: Boolean = false): Modifier {
+     )
+ }
+ 
++/**
++ * Sizes the icon box of a large tile, which keeps the icon in the same place on every tile.
++ *
++ * Dual target tiles fill the whole [ToggleTargetSize] box with the icon background. Without a
++ * background, the empty end of the box would only push the label away from the bare icon, so it is
++ * left out of the measured width: the label then starts as far from the icon as it starts from the
++ * background on dual target tiles, and gets that room. The icon itself does not move and is not
++ * clipped, and RTL mirrors this as usual.
++ *
++ * @param progress how far the tile is resized from icon only (0f) to large (1f), for edit mode.
++ */
++fun Modifier.largeTileIconBox(
++    hasIconBackground: Boolean,
++    progress: () -> Float = { 1f },
++): Modifier {
++    return thenIf(!hasIconBackground) {
++            Modifier.layout { measurable, constraints ->
++                val placeable = measurable.measure(constraints)
++                val inset = (LargeTileIconInset.toPx() * progress()).roundToInt()
++                val width = (placeable.width - inset).coerceAtLeast(constraints.minWidth)
++                layout(width, placeable.height) { placeable.placeRelative(0, 0) }
++            }
++        }
++        .size(ToggleTargetSize)
++}
++
+ private fun DrawScope.drawFadedEdge(startX: Float, endX: Float, colors: List<Color>) {
+     drawRect(
+         topLeft = Offset(startX, 0f),
+@@ -422,6 +452,8 @@ object CommonTileDefaults {
+     val TileEndPadding = 12.dp
+     val TileDualTargetEndPadding = 8.dp
+     val TileArrangementPadding = 6.dp
++    /** Space between a centered [LargeTileIconSize] icon and the edges of its icon box. */
++    val LargeTileIconInset = (ToggleTargetSize - LargeTileIconSize) / 2
+     val InactiveCornerRadius = 50.dp
+     val TileLabelBlurWidth = 32.dp
+     const val TILE_MARQUEE_ITERATIONS = 1
+diff --git a/packages/SystemUI/src/com/android/systemui/qs/panels/ui/compose/infinitegrid/EditTile.kt b/packages/SystemUI/src/com/android/systemui/qs/panels/ui/compose/infinitegrid/EditTile.kt
+index 7bb572aab..146b7ffd2 100644
+--- a/packages/SystemUI/src/com/android/systemui/qs/panels/ui/compose/infinitegrid/EditTile.kt
++++ b/packages/SystemUI/src/com/android/systemui/qs/panels/ui/compose/infinitegrid/EditTile.kt
+@@ -1366,7 +1366,7 @@ fun EditTile(
+     ) {
+         // Icon
+         Box(
+-            Modifier.size(ToggleTargetSize).thenIf(tile.isDualTarget) {
++            Modifier.largeTileIconBox(tile.isDualTarget, progress).thenIf(tile.isDualTarget) {
+                 Modifier.drawBehind { drawCircle(colors.iconBackground, alpha = progress()) }
+             }
+         ) {
