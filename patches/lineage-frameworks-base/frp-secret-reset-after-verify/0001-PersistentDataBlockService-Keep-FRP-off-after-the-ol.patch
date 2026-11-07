@@ -1,0 +1,40 @@
+From f9c742ef251744ee7a08e22c3787593a56fec3dc Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Thu, 5 Nov 2026 18:42:54 +0100
+Subject: [PATCH] PersistentDataBlockService: Keep FRP off after the old screen
+ lock is verified
+
+Verifying the FRP credential only cleared FRP in memory. Setup wizards
+without FRP support (Lineage's) never store a new FRP secret, so after a
+reset from a build whose setup wizard set one (e.g. GMS), FRP came back
+on every boot and blocked setting a screen lock. Reset the partition
+secret to the default after a successful verify; boot then deactivates
+FRP on its own. Setup wizards with FRP support still set their own
+secret afterwards.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Change-Id: If5ba5599cac238ac23880091b566a67504695742
+---
+ .../android/server/pdb/PersistentDataBlockService.java   | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/services/core/java/com/android/server/pdb/PersistentDataBlockService.java b/services/core/java/com/android/server/pdb/PersistentDataBlockService.java
+index 5ddc442f6..f49f484f9 100644
+--- a/services/core/java/com/android/server/pdb/PersistentDataBlockService.java
++++ b/services/core/java/com/android/server/pdb/PersistentDataBlockService.java
+@@ -1298,6 +1298,15 @@ public class PersistentDataBlockService extends SystemService {
+             synchronized (mLock) {
+                 mFrpActive = false;
+                 setOldSettingForBackworkCompatibility(/* isActive */ mFrpActive);
++                // The previous screen lock was just verified. A setup wizard without FRP support
++                // (like Lineage's) never stores a new secret, so FRP would come back on every
++                // boot. Go back to the default secret, which boot deactivates on its own.
++                // Setup wizards that do support FRP still set their own secret afterwards.
++                final byte[] defaultSecret = new byte[FRP_SECRET_SIZE];
++                if (!Arrays.equals(getFrpSecret(), defaultSecret)
++                        && !updateFrpSecret(defaultSecret)) {
++                    Slog.e(TAG, "Failed to reset the FRP secret to the default");
++                }
+             }
+             return true;
+         }
