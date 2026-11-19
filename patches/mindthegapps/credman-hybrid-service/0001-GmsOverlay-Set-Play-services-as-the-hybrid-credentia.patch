@@ -1,0 +1,36 @@
+From c3697bfc91f9b8903d76433b1a13d28da8cd6626 Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Tue, 10 Nov 2026 20:48:27 +0100
+Subject: [PATCH] GmsOverlay: Set Play services as the hybrid credential
+ service
+
+The framework only accepts a credential provider's remote entry ("use a
+passkey from another device") from the service named in
+config_defaultCredentialManagerHybridService. It was empty, so the remote
+entry from Play services was dropped ("Remote entry being dropped as it is
+not from the service configured by the OEM") and the passkey sheet failed
+to open in apps like Discord when no passkey was saved on the phone.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ overlay/GmsOverlay/res/values/config.xml | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/overlay/GmsOverlay/res/values/config.xml b/overlay/GmsOverlay/res/values/config.xml
+index 4ad4974..6f0df6d 100644
+--- a/overlay/GmsOverlay/res/values/config.xml
++++ b/overlay/GmsOverlay/res/values/config.xml
+@@ -133,4 +133,10 @@
+ 
+     <!-- The key containing the branching boolean for legacy Search. -->
+     <string name="config_defaultContextualSearchLegacyEnabled" translatable="false">omni.enable_vis</string>
++
++    <!-- Play services handles "use a passkey from another device" (hybrid / QR).
++         Without this the framework drops its remote entry, and the passkey sheet
++         fails to open when the phone itself has no saved passkey. Same value as
++         on Pixel. -->
++    <string name="config_defaultCredentialManagerHybridService" translatable="false">com.google.android.gms/.auth.api.credentials.credman.service.RemoteService</string>
+ </resources>
+-- 
+2.56.1
+
